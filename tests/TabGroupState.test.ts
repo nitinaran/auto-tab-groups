@@ -88,6 +88,15 @@ describe("TabGroupState", () => {
       expect(tabGroupState.indexGroupTitles).toBe(false)
     })
 
+    it("should default groupByContainer to false", () => {
+      expect(tabGroupState.groupByContainer).toBe(false)
+    })
+
+    it("should update groupByContainer", () => {
+      tabGroupState.updateFromStorage({ groupByContainer: true })
+      expect(tabGroupState.groupByContainer).toBe(true)
+    })
+
     it("should update customRules", () => {
       const rules: Record<string, CustomRule> = {
         "rule-1": {

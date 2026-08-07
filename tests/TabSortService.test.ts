@@ -467,6 +467,7 @@ describe("TabSortService", () => {
   describe("applySorting", () => {
     it("should call sortGroups when sortGroupsAlphabetically is enabled", async () => {
       tabGroupState.sortGroupsAlphabetically = true
+      tabGroupState.groupByContainer = false
       mockBrowser.tabGroups.query.mockResolvedValue([
         { id: 1, title: "B", windowId: 1 },
         { id: 2, title: "A", windowId: 1 }
@@ -480,10 +481,183 @@ describe("TabSortService", () => {
 
     it("should not call sortGroups when sortGroupsAlphabetically is disabled", async () => {
       tabGroupState.sortGroupsAlphabetically = false
+      tabGroupState.groupByContainer = false
 
       await tabSortService.applySorting()
 
       expect(mockBrowser.tabGroups.move).not.toHaveBeenCalled()
+    })
+
+    it("should call sortGroupTabsByContainer when groupByContainer is enabled", async () => {
+      tabGroupState.sortGroupsAlphabetically = false
+      tabGroupState.groupByContainer = true
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 0 }) // tab 1 queried before first move
+        .mockResolvedValueOnce({ index: 1 }) // tab 2 queried before second move
+
+      await tabSortService.applySorting()
+
+      // container-1 should come before container-2, so tab 2 moves to index 0
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+    })
+
+    it("should not call sortGroupTabsByContainer when groupByContainer is disabled", async () => {
+      tabGroupState.sortGroupsAlphabetically = false
+      tabGroupState.groupByContainer = false
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" }
+      ])
+
+      await tabSortService.applySorting()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("sortGroupTabsByContainer", () => {
+    beforeEach(() => {
+      tabGroupState.groupByContainer = true
+    })
+
+    it("should reorder tabs so same-container tabs are adjacent", async () => {
+      // Group 10: tab A (container-2), tab B (container-1) — wrong order
+      // Expected: tab B (container-1), tab A (container-2)
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 5, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: 10, index: 6, cookieStoreId: "firefox-container-1" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 6 }) // tab 2 current position before move
+        .mockResolvedValueOnce({ index: 6 }) // tab 1 current position after tab 2 moved
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 5 })
+    })
+
+    it("should not move tabs already in the correct container order", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-1" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-2" }
+      ])
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should leave a single-tab group untouched", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-1" }
+      ])
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should be a no-op on Chrome tabs that have no cookieStoreId", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0 },
+        { id: 2, groupId: 10, index: 1 },
+        { id: 3, groupId: 10, index: 2 }
+      ])
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      // All tabs have the same empty container — no reordering needed
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should process every group in the window when no groupId is given", async () => {
+      // Two groups, each with out-of-order containers
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" },
+        { id: 3, groupId: 20, index: 2, cookieStoreId: "firefox-container-2" },
+        { id: 4, groupId: 20, index: 3, cookieStoreId: "firefox-container-1" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 1 })
+        .mockResolvedValueOnce({ index: 1 })
+        .mockResolvedValueOnce({ index: 3 })
+        .mockResolvedValueOnce({ index: 3 })
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(2)
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(4, { index: 2 })
+    })
+
+    it("should only sort the specified group when groupId is given", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" },
+        { id: 3, groupId: 20, index: 2, cookieStoreId: "firefox-container-2" },
+        { id: 4, groupId: 20, index: 3, cookieStoreId: "firefox-container-1" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 1 })
+        .mockResolvedValueOnce({ index: 1 })
+
+      // Only sort group 10
+      await tabSortService.sortGroupTabsByContainer(10)
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+    })
+
+    it("should skip ungrouped tabs (groupId === -1)", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: -1, index: 0, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: -1, index: 1, cookieStoreId: "firefox-container-1" }
+      ])
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should keep tabs with the same container in their original relative order (stable sort)", async () => {
+      // Tabs 1 and 3 share container-1; tabs 2 and 4 share container-2
+      // After sort: container-1 first (tabs 1, 3), then container-2 (tabs 2, 4)
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-1" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-2" },
+        { id: 3, groupId: 10, index: 2, cookieStoreId: "firefox-container-1" },
+        { id: 4, groupId: 10, index: 3, cookieStoreId: "firefox-container-2" }
+      ])
+      // After stable sort: [1(c1), 3(c1), 2(c2), 4(c2)] — needs moves
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 0 }) // tab 1 already at 0, no move
+        .mockResolvedValueOnce({ index: 2 }) // tab 3 currently at 2, needs to go to 1
+        .mockResolvedValueOnce({ index: 2 }) // tab 2 now at 2 after shift, goes to 2 (no move)
+        .mockResolvedValueOnce({ index: 3 }) // tab 4 at 3, goes to 3 (no move)
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
+    })
+
+    it("should handle errors gracefully without throwing", async () => {
+      mockBrowser.tabs.query.mockRejectedValue(new Error("API error"))
+
+      await expect(tabSortService.sortGroupTabsByContainer()).resolves.toBeUndefined()
+    })
+
+    it("should do nothing when window has no id", async () => {
+      mockBrowser.windows.getCurrent.mockResolvedValueOnce({ id: undefined })
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.query).not.toHaveBeenCalled()
     })
   })
 

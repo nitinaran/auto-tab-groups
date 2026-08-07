@@ -106,6 +106,10 @@ export const userLocale = storage.defineItem<UserLocale>("local:userLocale", {
   fallback: DEFAULT_STATE.userLocale
 })
 
+export const groupByContainer = storage.defineItem<boolean>("local:groupByContainer", {
+  fallback: DEFAULT_STATE.groupByContainer
+})
+
 /**
  * Cached AI suggestions (survives popup reopens, not a user setting)
  */
@@ -139,7 +143,8 @@ export async function loadAllStorage(): Promise<StorageSchema> {
     hideContextMenuValue,
     userLocaleValue,
     protectedGroupTitlesValue,
-    deferGroupingUntilSeenValue
+    deferGroupingUntilSeenValue,
+    groupByContainerValue
   ] = await Promise.all([
     autoGroupingEnabled.getValue(),
     groupNewTabs.getValue(),
@@ -161,7 +166,8 @@ export async function loadAllStorage(): Promise<StorageSchema> {
     hideContextMenu.getValue(),
     userLocale.getValue(),
     protectedGroupTitles.getValue(),
-    deferGroupingUntilSeen.getValue()
+    deferGroupingUntilSeen.getValue(),
+    groupByContainer.getValue()
   ])
 
   return {
@@ -185,7 +191,8 @@ export async function loadAllStorage(): Promise<StorageSchema> {
     hideContextMenu: hideContextMenuValue,
     userLocale: userLocaleValue,
     protectedGroupTitles: protectedGroupTitlesValue,
-    deferGroupingUntilSeen: deferGroupingUntilSeenValue
+    deferGroupingUntilSeen: deferGroupingUntilSeenValue,
+    groupByContainer: groupByContainerValue
   }
 }
 
@@ -257,6 +264,9 @@ export async function saveAllStorage(data: Partial<StorageSchema>): Promise<void
   }
   if (data.deferGroupingUntilSeen !== undefined) {
     promises.push(deferGroupingUntilSeen.setValue(data.deferGroupingUntilSeen))
+  }
+  if (data.groupByContainer !== undefined) {
+    promises.push(groupByContainer.setValue(data.groupByContainer))
   }
   await Promise.all(promises)
 }

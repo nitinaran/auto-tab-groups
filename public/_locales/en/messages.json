@@ -495,6 +495,15 @@
     "description": "Tooltip for the blacklist delete button."
   },
 
+  "settingGroupByContainer": {
+    "message": "Keep same-container tabs together",
+    "description": "Toggle that reorders tabs within each group by Firefox Multi-Account Container."
+  },
+  "settingGroupByContainerHelp": {
+    "message": "Reorders tabs within each group so Firefox Multi-Account Container tabs are grouped together",
+    "description": "Help text for the Keep same-container tabs together toggle."
+  },
+
   "advancedSectionTitle": {
     "message": "Advanced",
     "description": "Title for the advanced settings section."

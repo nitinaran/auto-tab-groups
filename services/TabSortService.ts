@@ -203,6 +203,87 @@ class TabSortService {
   }
 
   /**
+   * Reorders tabs within each tab group so tabs from the same Firefox
+   * Multi-Account Container (cookieStoreId) are kept together.
+   *
+   * Works by stable-sorting tabs within each group by their cookieStoreId,
+   * then moving any that are out of place to their target absolute index.
+   * On Chrome (no cookieStoreId), all tabs sort to the empty string and
+   * the order never changes — effectively a no-op.
+   *
+   * If groupId is supplied, only that group is reordered; otherwise every
+   * group in the current window is processed.
+   */
+  async sortGroupTabsByContainer(groupId?: number): Promise<void> {
+    try {
+      const currentWindow = await browser.windows.getCurrent()
+      if (!currentWindow.id) return
+
+      const allTabs = await browser.tabs.query({ windowId: currentWindow.id })
+
+      let groupIds: number[]
+      if (groupId !== undefined) {
+        groupIds = [groupId]
+      } else {
+        const seen = new Set<number>()
+        for (const tab of allTabs) {
+          if (tab.groupId && tab.groupId !== -1) {
+            seen.add(tab.groupId)
+          }
+        }
+        groupIds = [...seen]
+      }
+
+      for (const gId of groupIds) {
+        const groupTabs = allTabs
+          .filter(tab => tab.groupId === gId)
+          .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+
+        if (groupTabs.length <= 1) continue
+
+        // Stable sort by cookieStoreId — tabs without one (Chrome) all share
+        // the empty string so their relative order is preserved unchanged.
+        const desiredOrder = [...groupTabs].sort((a, b) => {
+          const aId = (a as { cookieStoreId?: string }).cookieStoreId ?? ""
+          const bId = (b as { cookieStoreId?: string }).cookieStoreId ?? ""
+          return aId.localeCompare(bId)
+        })
+
+        const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
+        if (alreadySorted) continue
+
+        const startIdx = groupTabs[0].index ?? 0
+
+        for (let i = 0; i < desiredOrder.length; i++) {
+          const tab = desiredOrder[i]
+          if (tab.id === undefined) continue
+
+          // Re-query to get the tab's current index after previous moves shifted things.
+          const currentTab = await browser.tabs.get(tab.id)
+          const targetIndex = startIdx + i
+
+          if (currentTab.index !== targetIndex) {
+            await withTabEditRetry(() => browser.tabs.move(tab.id!, { index: targetIndex }))
+            await new Promise(resolve => setTimeout(resolve, 10))
+          }
+        }
+      }
+    } catch (error) {
+      console.error("[TabSortService] Error sorting tabs by container:", error)
+    }
+  }
+
+  /**
+   * Applies container sorting if the setting is enabled.
+   * Called after grouping operations complete.
+   */
+  async applyContainerSorting(): Promise<void> {
+    if (tabGroupState.groupByContainer) {
+      await this.sortGroupTabsByContainer()
+    }
+  }
+
+  /**
    * Applies sorting if the setting is enabled.
    * Called after grouping operations complete.
    */
@@ -210,6 +291,7 @@ class TabSortService {
     if (tabGroupState.sortGroupsAlphabetically) {
       await this.sortGroups()
     }
+    await this.applyContainerSorting()
   }
 }
 

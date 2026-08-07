@@ -326,6 +326,21 @@ export default defineBackground(() => {
             result = { enabled: tabGroupState.deferGroupingUntilSeen }
             break
 
+          case "getGroupByContainer":
+            result = { enabled: tabGroupState.groupByContainer }
+            break
+
+          case "toggleGroupByContainer": {
+            tabGroupState.groupByContainer = msg.enabled
+            await saveState()
+            if (msg.enabled) {
+              const { tabSortService } = await import("../services/TabSortService")
+              await tabSortService.sortGroupTabsByContainer()
+            }
+            result = { enabled: tabGroupState.groupByContainer }
+            break
+          }
+
           case "moveTabToGroupWindow":
             result = await tabGroupService.moveTabToItsGroupWindow(msg.tabId)
             break

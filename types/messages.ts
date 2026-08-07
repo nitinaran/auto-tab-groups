@@ -33,6 +33,8 @@ export type MessageAction =
   | "toggleOpenTabNextToCurrent"
   | "getDeferGroupingUntilSeen"
   | "toggleDeferGroupingUntilSeen"
+  | "getGroupByContainer"
+  | "toggleGroupByContainer"
   | "getSortGroupsAlphabetically"
   | "toggleSortGroupsAlphabetically"
   | "getSortGroupsDirection"
@@ -86,6 +88,7 @@ export interface SimpleMessage extends BaseMessage {
     | "getMinimumTabsForGroup"
     | "getOpenTabNextToCurrent"
     | "getDeferGroupingUntilSeen"
+    | "getGroupByContainer"
     | "getSortGroupsAlphabetically"
     | "getSortGroupsDirection"
     | "getIndexGroupTitles"
@@ -185,6 +188,14 @@ export interface ToggleDeferGroupingMessage extends BaseMessage {
 }
 
 /**
+ * Toggle reordering tabs within groups by Firefox Multi-Account Container
+ */
+export interface ToggleGroupByContainerMessage extends BaseMessage {
+  action: "toggleGroupByContainer"
+  enabled: boolean
+}
+
+/**
  * Toggle sort groups alphabetically message
  */
 export interface ToggleSortGroupsMessage extends BaseMessage {
@@ -277,6 +288,8 @@ export type Message =
   | SetGroupByModeMessage
   | SetMinimumTabsMessage
   | ToggleOpenTabNextToCurrentMessage
+  | ToggleDeferGroupingMessage
+  | ToggleGroupByContainerMessage
   | ToggleSortGroupsMessage
   | SetSortGroupsDirectionMessage
   | ToggleIndexGroupTitlesMessage

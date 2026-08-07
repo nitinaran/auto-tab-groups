@@ -89,6 +89,11 @@ export interface StorageSchema {
    * edited from the group's right-click menu.
    */
   protectedGroupTitles: string[]
+  /**
+   * Whether to reorder tabs within each group so tabs from the same
+   * Firefox Multi-Account Container are kept together.
+   */
+  groupByContainer: boolean
 }
 
 /**
@@ -115,7 +120,8 @@ export const DEFAULT_STATE: StorageSchema = {
   indexGroupTitles: false,
   hideContextMenu: false,
   userLocale: "auto",
-  protectedGroupTitles: []
+  protectedGroupTitles: [],
+  groupByContainer: false
 }
 
 /**

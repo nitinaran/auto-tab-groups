@@ -50,6 +50,17 @@ const openTabNextToCurrentToggle = document.getElementById(
   "openTabNextToCurrentToggle"
 ) as HTMLInputElement
 
+// Container Sorting Elements
+const groupByContainerToggle = document.getElementById(
+  "groupByContainerToggle"
+) as HTMLInputElement
+const groupByContainerContainer = document.getElementById(
+  "groupByContainerContainer"
+) as HTMLDivElement
+const groupByContainerBadge = document.getElementById(
+  "groupByContainerBadge"
+) as HTMLSpanElement
+
 // Sorting Elements
 const sortingToggle = document.querySelector(".sorting-toggle") as HTMLButtonElement
 const sortingContent = document.querySelector(".sorting-content") as HTMLDivElement
@@ -650,6 +661,14 @@ const i18nReady: Promise<void> = (async () => {
 updateVersionDisplay()
 updateBrowserDisplay()
 
+// Disable the container-sorting toggle on non-Firefox browsers — cookieStoreId
+// (the Multi-Account Container identifier) is a Firefox-only tab property.
+if (!navigator.userAgent.includes("Firefox")) {
+  groupByContainerToggle.disabled = true
+  groupByContainerContainer.classList.add("disabled")
+  groupByContainerBadge.classList.remove("hidden")
+}
+
 // Language picker change handler — also re-renders dynamic lists so their
 // JS-rendered strings (Edit/Delete buttons, truncation suffix, empty states)
 // switch along with the static DOM.
@@ -751,6 +770,19 @@ sendMessage<{ enabled?: boolean }>({ action: "getDeferGroupingUntilSeen" }).then
 deferGroupingToggle.addEventListener("change", event => {
   sendMessage({
     action: "toggleDeferGroupingUntilSeen",
+    enabled: (event.target as HTMLInputElement).checked
+  })
+})
+
+sendMessage<{ enabled?: boolean }>({ action: "getGroupByContainer" }).then(response => {
+  if (response?.enabled !== undefined) {
+    groupByContainerToggle.checked = response.enabled
+  }
+})
+
+groupByContainerToggle.addEventListener("change", event => {
+  sendMessage({
+    action: "toggleGroupByContainer",
     enabled: (event.target as HTMLInputElement).checked
   })
 })
