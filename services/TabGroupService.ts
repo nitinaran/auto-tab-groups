@@ -23,6 +23,7 @@ interface CollapseState {
 class TabGroupServiceSimplified {
   private recentlyCreatedTabIds = new Set<number>()
   private processingTabs = new Set<number>()
+  private pendingReprocessTabs = new Set<number>()
   private bulkOperationInProgress = false
 
   markAsNewTab(tabId: number): void {
@@ -85,18 +86,32 @@ class TabGroupServiceSimplified {
     }
 
     // Prevent concurrent processing of the same tab (e.g. onMoved firing
-    // while we are still setting the group title after tabs.group())
+    // while we are still setting the group title after tabs.group()). The
+    // event that arrived during processing reflects state (e.g. a URL
+    // change) the in-flight call's decision doesn't know about, so rather
+    // than dropping it, flag the tab for another pass once that call
+    // finishes — the reprocess re-reads the tab's live URL, so it always
+    // acts on the latest state rather than what triggered it.
     if (this.processingTabs.has(tabId)) {
-      console.log(`[TabGroupService] Tab ${tabId} already being processed, skipping`)
+      console.log(`[TabGroupService] Tab ${tabId} already being processed, queuing reprocess`)
+      this.pendingReprocessTabs.add(tabId)
       return false
     }
 
     this.processingTabs.add(tabId)
     try {
-      const result = await this._doHandleTabUpdate(tabId, forceGrouping)
+      let result = await this._doHandleTabUpdate(tabId, forceGrouping)
       if (result && !this.bulkOperationInProgress) {
         await tabSortService.applySorting()
       }
+
+      while (this.pendingReprocessTabs.delete(tabId)) {
+        result = await this._doHandleTabUpdate(tabId, forceGrouping)
+        if (result && !this.bulkOperationInProgress) {
+          await tabSortService.applySorting()
+        }
+      }
+
       return result
     } finally {
       this.processingTabs.delete(tabId)

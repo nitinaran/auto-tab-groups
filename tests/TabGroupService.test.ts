@@ -1270,7 +1270,7 @@ describe("TabGroupService", () => {
       tabGroupState.updateFromStorage({ ...DEFAULT_STATE, autoGroupingEnabled: true })
     })
 
-    it("should skip second handleTabUpdate while first is still processing", async () => {
+    it("should return false immediately for a concurrent call, then reprocess the tab once the first call finishes", async () => {
       // Simulate a slow tabs.group call that gives onMoved time to re-trigger
       let resolveGroup: (value: number) => void
       const slowGroup = new Promise<number>(resolve => {
@@ -1297,7 +1297,10 @@ describe("TabGroupService", () => {
       // Give microtasks a tick so the guard is set
       await Promise.resolve()
 
-      // Second call (simulates onMoved re-trigger) should be skipped
+      // Second call (simulates onMoved re-trigger while the first is still
+      // in flight) returns false immediately — but must not be dropped:
+      // the tab's URL may have changed since the first call read it, so it
+      // has to be reprocessed once that call finishes rather than ignored.
       const secondResult = await tabGroupService.handleTabUpdate(1)
       expect(secondResult).toBe(false)
 
@@ -1306,8 +1309,10 @@ describe("TabGroupService", () => {
       const firstResult = await firstCall
       expect(firstResult).toBe(true)
 
-      // tabs.group should only have been called once (from the first call)
-      expect(mockBrowser.tabs.group).toHaveBeenCalledTimes(1)
+      // tabs.group is called again by the queued reprocess pass, since the
+      // mocked tab state still reports groupId -1 (as if the concurrent
+      // update had changed something that still needs grouping).
+      expect(mockBrowser.tabs.group).toHaveBeenCalledTimes(2)
     })
 
     it("should allow processing after first call completes", async () => {
