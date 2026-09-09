@@ -496,8 +496,8 @@ describe("TabSortService", () => {
         { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" }
       ])
       mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 0 }) // tab 1 queried before first move
-        .mockResolvedValueOnce({ index: 1 }) // tab 2 queried before second move
+        .mockResolvedValueOnce({ index: 1, groupId: 10 }) // tab 2 current position before move
+        .mockResolvedValueOnce({ index: 1, groupId: 10 }) // tab 1 current position after tab 2 moved
 
       await tabSortService.applySorting()
 
@@ -532,8 +532,8 @@ describe("TabSortService", () => {
         { id: 2, groupId: 10, index: 6, cookieStoreId: "firefox-container-1" }
       ])
       mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 6 }) // tab 2 current position before move
-        .mockResolvedValueOnce({ index: 6 }) // tab 1 current position after tab 2 moved
+        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 2 current position before move
+        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 1 current position after tab 2 moved
 
       await tabSortService.sortGroupTabsByContainer()
 
@@ -583,10 +583,10 @@ describe("TabSortService", () => {
         { id: 4, groupId: 20, index: 3, cookieStoreId: "firefox-container-1" }
       ])
       mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 1 })
-        .mockResolvedValueOnce({ index: 1 })
-        .mockResolvedValueOnce({ index: 3 })
-        .mockResolvedValueOnce({ index: 3 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+        .mockResolvedValueOnce({ index: 3, groupId: 20 })
+        .mockResolvedValueOnce({ index: 3, groupId: 20 })
 
       await tabSortService.sortGroupTabsByContainer()
 
@@ -603,8 +603,8 @@ describe("TabSortService", () => {
         { id: 4, groupId: 20, index: 3, cookieStoreId: "firefox-container-1" }
       ])
       mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 1 })
-        .mockResolvedValueOnce({ index: 1 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
 
       // Only sort group 10
       await tabSortService.sortGroupTabsByContainer(10)
@@ -635,15 +635,31 @@ describe("TabSortService", () => {
       ])
       // After stable sort: [1(c1), 3(c1), 2(c2), 4(c2)] — needs moves
       mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 0 }) // tab 1 already at 0, no move
-        .mockResolvedValueOnce({ index: 2 }) // tab 3 currently at 2, needs to go to 1
-        .mockResolvedValueOnce({ index: 2 }) // tab 2 now at 2 after shift, goes to 2 (no move)
-        .mockResolvedValueOnce({ index: 3 }) // tab 4 at 3, goes to 3 (no move)
+        .mockResolvedValueOnce({ index: 0, groupId: 10 }) // tab 1 already at 0, no move
+        .mockResolvedValueOnce({ index: 2, groupId: 10 }) // tab 3 currently at 2, needs to go to 1
+        .mockResolvedValueOnce({ index: 2, groupId: 10 }) // tab 2 now at 2 after shift, goes to 2 (no move)
+        .mockResolvedValueOnce({ index: 3, groupId: 10 }) // tab 4 at 3, goes to 3 (no move)
 
       await tabSortService.sortGroupTabsByContainer()
 
       expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
       expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
+    })
+
+    it("should skip a tab that has left the group since the snapshot was taken", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
+        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" }
+      ])
+      // Tab 2 needs to move to index 0, but by the time we check its live
+      // state it has already been reassigned to a different group (e.g. a
+      // concurrent grouping operation elsewhere) — moving it now would
+      // forcibly pull it back into group 10.
+      mockBrowser.tabs.get.mockResolvedValueOnce({ index: 1, groupId: 99 })
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
     })
 
     it("should handle errors gracefully without throwing", async () => {
@@ -658,6 +674,43 @@ describe("TabSortService", () => {
       await tabSortService.sortGroupTabsByContainer()
 
       expect(mockBrowser.tabs.query).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("mutex", () => {
+    it("should not let two sort operations run concurrently", async () => {
+      const order: string[] = []
+      let releaseFirst: () => void = () => {}
+      const gate = new Promise<void>(resolve => {
+        releaseFirst = resolve
+      })
+
+      let call = 0
+      mockBrowser.windows.getCurrent.mockImplementation(async () => {
+        call++
+        const thisCall = call
+        order.push(`start:${thisCall}`)
+        if (thisCall === 1) {
+          await gate
+        }
+        return { id: 1 }
+      })
+      mockBrowser.tabs.query.mockResolvedValue([])
+
+      // Two separate calls to the same entry point, sharing the mutex
+      const first = tabSortService.sortGroupTabsByContainer()
+      const second = tabSortService.sortGroupTabsByContainer()
+
+      // While the first call is still blocked on the gate, the second call's
+      // windows.getCurrent must not have run yet — it's waiting for the mutex.
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(order).toEqual(["start:1"])
+
+      releaseFirst()
+      await Promise.all([first, second])
+
+      expect(order).toEqual(["start:1", "start:2"])
     })
   })
 

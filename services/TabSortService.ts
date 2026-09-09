@@ -43,6 +43,42 @@ function isAlreadySorted(
 
 class TabSortService {
   /**
+   * Serializes every group/tab-position mutating operation below. Two of
+   * these running concurrently (e.g. triggered by two tabs finishing their
+   * navigation close together) would each compute moves from their own
+   * independently stale snapshot, and their moves could interleave —
+   * observed in practice as one operation moving a tab back into a group it
+   * had already legitimately left, corrupting group membership.
+   */
+  private mutex: Promise<unknown> = Promise.resolve()
+
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.mutex.then(fn, fn)
+    this.mutex = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  /**
+   * Resolves which group IDs a per-group tab-sorting pass should process:
+   * just the one supplied, or every group currently present in the window.
+   */
+  private async resolveGroupIds(windowId: number, groupId?: number): Promise<number[]> {
+    if (groupId !== undefined) return [groupId]
+
+    const allTabs = await browser.tabs.query({ windowId })
+    const seen = new Set<number>()
+    for (const tab of allTabs) {
+      if (tab.groupId && tab.groupId !== -1) {
+        seen.add(tab.groupId)
+      }
+    }
+    return [...seen]
+  }
+
+  /**
    * Sorts tab groups alphabetically by title (A-Z or Z-A) in the current
    * window, then moves ungrouped non-pinned tabs to the end of the tab
    * strip. When indexing is enabled, applies numbered prefixes to titles.
@@ -53,6 +89,10 @@ class TabSortService {
    * Chrome-only: browser.tabGroups.move() is not available in Firefox.
    */
   async sortGroups(): Promise<void> {
+    return this.runExclusive(() => this._sortGroups())
+  }
+
+  private async _sortGroups(): Promise<void> {
     const tabGroups = browser.tabGroups as unknown as TabGroupsWithMove | undefined
 
     if (!tabGroups?.move) {
@@ -215,62 +255,62 @@ class TabSortService {
    * group in the current window is processed.
    */
   async sortGroupTabsByContainer(groupId?: number): Promise<void> {
-    try {
-      const currentWindow = await browser.windows.getCurrent()
-      if (!currentWindow.id) return
+    return this.runExclusive(async () => {
+      try {
+        const currentWindow = await browser.windows.getCurrent()
+        if (!currentWindow.id) return
+        const windowId = currentWindow.id
 
-      const allTabs = await browser.tabs.query({ windowId: currentWindow.id })
+        const groupIds = await this.resolveGroupIds(windowId, groupId)
 
-      let groupIds: number[]
-      if (groupId !== undefined) {
-        groupIds = [groupId]
-      } else {
-        const seen = new Set<number>()
-        for (const tab of allTabs) {
-          if (tab.groupId && tab.groupId !== -1) {
-            seen.add(tab.groupId)
+        for (const gId of groupIds) {
+          // Re-query this group's tabs fresh right before acting on it, rather
+          // than reusing a snapshot taken earlier — minimizes the window for a
+          // concurrent operation (e.g. another tab being grouped elsewhere) to
+          // change membership out from under us.
+          const groupTabs = (await browser.tabs.query({ windowId, groupId: gId }))
+            .filter(tab => tab.groupId === gId)
+            .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+
+          if (groupTabs.length <= 1) continue
+
+          // Stable sort by cookieStoreId — tabs without one (Chrome) all share
+          // the empty string so their relative order is preserved unchanged.
+          const desiredOrder = [...groupTabs].sort((a, b) => {
+            const aId = (a as { cookieStoreId?: string }).cookieStoreId ?? ""
+            const bId = (b as { cookieStoreId?: string }).cookieStoreId ?? ""
+            return aId.localeCompare(bId)
+          })
+
+          const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
+          if (alreadySorted) continue
+
+          const startIdx = groupTabs[0].index ?? 0
+
+          for (let i = 0; i < desiredOrder.length; i++) {
+            const tab = desiredOrder[i]
+            if (tab.id === undefined) continue
+
+            // Re-query to get the tab's current state after previous moves shifted things.
+            const currentTab = await browser.tabs.get(tab.id)
+
+            // The tab may have left this group since the snapshot above (e.g.
+            // a concurrent grouping operation elsewhere) — forcing it to an
+            // absolute index here would re-merge it into this group. Skip it.
+            if (currentTab.groupId !== gId) continue
+
+            const targetIndex = startIdx + i
+
+            if (currentTab.index !== targetIndex) {
+              await withTabEditRetry(() => browser.tabs.move(tab.id!, { index: targetIndex }))
+              await new Promise(resolve => setTimeout(resolve, 10))
+            }
           }
         }
-        groupIds = [...seen]
+      } catch (error) {
+        console.error("[TabSortService] Error sorting tabs by container:", error)
       }
-
-      for (const gId of groupIds) {
-        const groupTabs = allTabs
-          .filter(tab => tab.groupId === gId)
-          .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-
-        if (groupTabs.length <= 1) continue
-
-        // Stable sort by cookieStoreId — tabs without one (Chrome) all share
-        // the empty string so their relative order is preserved unchanged.
-        const desiredOrder = [...groupTabs].sort((a, b) => {
-          const aId = (a as { cookieStoreId?: string }).cookieStoreId ?? ""
-          const bId = (b as { cookieStoreId?: string }).cookieStoreId ?? ""
-          return aId.localeCompare(bId)
-        })
-
-        const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
-        if (alreadySorted) continue
-
-        const startIdx = groupTabs[0].index ?? 0
-
-        for (let i = 0; i < desiredOrder.length; i++) {
-          const tab = desiredOrder[i]
-          if (tab.id === undefined) continue
-
-          // Re-query to get the tab's current index after previous moves shifted things.
-          const currentTab = await browser.tabs.get(tab.id)
-          const targetIndex = startIdx + i
-
-          if (currentTab.index !== targetIndex) {
-            await withTabEditRetry(() => browser.tabs.move(tab.id!, { index: targetIndex }))
-            await new Promise(resolve => setTimeout(resolve, 10))
-          }
-        }
-      }
-    } catch (error) {
-      console.error("[TabSortService] Error sorting tabs by container:", error)
-    }
+    })
   }
 
   /**
