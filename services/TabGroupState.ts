@@ -33,6 +33,7 @@ class TabGroupState {
   userLocale: UserLocale
   protectedGroupTitles: string[]
   groupByContainer: boolean
+  groupByHost: boolean
 
   constructor() {
     this.autoGroupingEnabled = DEFAULT_STATE.autoGroupingEnabled
@@ -53,6 +54,7 @@ class TabGroupState {
     this.userLocale = DEFAULT_STATE.userLocale
     this.protectedGroupTitles = [...DEFAULT_STATE.protectedGroupTitles]
     this.groupByContainer = DEFAULT_STATE.groupByContainer
+    this.groupByHost = DEFAULT_STATE.groupByHost
   }
 
   /**
@@ -76,6 +78,7 @@ class TabGroupState {
     this.userLocale = data.userLocale ?? this.userLocale
     this.protectedGroupTitles = data.protectedGroupTitles ?? this.protectedGroupTitles
     this.groupByContainer = data.groupByContainer ?? this.groupByContainer
+    this.groupByHost = data.groupByHost ?? this.groupByHost
 
     this.customRules.clear()
 
@@ -110,6 +113,7 @@ class TabGroupState {
       userLocale: this.userLocale,
       protectedGroupTitles: this.protectedGroupTitles,
       groupByContainer: this.groupByContainer,
+      groupByHost: this.groupByHost,
       // AI settings managed by AiService, pass defaults for storage schema
       aiEnabled: DEFAULT_STATE.aiEnabled,
       aiProvider: DEFAULT_STATE.aiProvider,

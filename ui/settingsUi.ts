@@ -51,15 +51,14 @@ const openTabNextToCurrentToggle = document.getElementById(
 ) as HTMLInputElement
 
 // Container Sorting Elements
-const groupByContainerToggle = document.getElementById(
-  "groupByContainerToggle"
-) as HTMLInputElement
+const groupByContainerToggle = document.getElementById("groupByContainerToggle") as HTMLInputElement
 const groupByContainerContainer = document.getElementById(
   "groupByContainerContainer"
 ) as HTMLDivElement
-const groupByContainerBadge = document.getElementById(
-  "groupByContainerBadge"
-) as HTMLSpanElement
+const groupByContainerBadge = document.getElementById("groupByContainerBadge") as HTMLSpanElement
+
+// Host Sorting Elements
+const groupByHostToggle = document.getElementById("groupByHostToggle") as HTMLInputElement
 
 // Sorting Elements
 const sortingToggle = document.querySelector(".sorting-toggle") as HTMLButtonElement
@@ -783,6 +782,19 @@ sendMessage<{ enabled?: boolean }>({ action: "getGroupByContainer" }).then(respo
 groupByContainerToggle.addEventListener("change", event => {
   sendMessage({
     action: "toggleGroupByContainer",
+    enabled: (event.target as HTMLInputElement).checked
+  })
+})
+
+sendMessage<{ enabled?: boolean }>({ action: "getGroupByHost" }).then(response => {
+  if (response?.enabled !== undefined) {
+    groupByHostToggle.checked = response.enabled
+  }
+})
+
+groupByHostToggle.addEventListener("change", event => {
+  sendMessage({
+    action: "toggleGroupByHost",
     enabled: (event.target as HTMLInputElement).checked
   })
 })

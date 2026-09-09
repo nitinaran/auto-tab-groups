@@ -22,6 +22,19 @@ interface TabGroupsWithMove {
 const INDEX_PREFIX_PATTERN = /^\d+\. /
 
 /**
+ * Extracts the hostname from a tab's URL. Returns "" for tabs with no URL
+ * or an unparsable URL (e.g. internal pages some browsers restrict access to).
+ */
+function getTabHost(url?: string): string {
+  if (!url) return ""
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ""
+  }
+}
+
+/**
  * Strips a leading index prefix (e.g., "1. GitHub" → "GitHub").
  * Returns the title unchanged if no prefix is present.
  */
@@ -324,6 +337,83 @@ class TabSortService {
   }
 
   /**
+   * Reorders tabs within each tab group so tabs with the same hostname
+   * are kept together.
+   *
+   * Works by stable-sorting tabs within each group by their URL's hostname,
+   * then moving any that are out of place to their target absolute index.
+   *
+   * If groupId is supplied, only that group is reordered; otherwise every
+   * group in the current window is processed.
+   */
+  async sortGroupTabsByHost(groupId?: number): Promise<void> {
+    return this.runExclusive(async () => {
+      try {
+        const currentWindow = await browser.windows.getCurrent()
+        if (!currentWindow.id) return
+        const windowId = currentWindow.id
+
+        const groupIds = await this.resolveGroupIds(windowId, groupId)
+
+        for (const gId of groupIds) {
+          // Re-query this group's tabs fresh right before acting on it, rather
+          // than reusing a snapshot taken earlier — minimizes the window for a
+          // concurrent operation (e.g. another tab being grouped elsewhere) to
+          // change membership out from under us.
+          const groupTabs = (await browser.tabs.query({ windowId, groupId: gId }))
+            .filter(tab => tab.groupId === gId)
+            .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+
+          if (groupTabs.length <= 1) continue
+
+          // Stable sort by hostname — tabs with the same host keep their
+          // relative order, and end up contiguous.
+          const desiredOrder = [...groupTabs].sort((a, b) =>
+            getTabHost(a.url).localeCompare(getTabHost(b.url))
+          )
+
+          const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
+          if (alreadySorted) continue
+
+          const startIdx = groupTabs[0].index ?? 0
+
+          for (let i = 0; i < desiredOrder.length; i++) {
+            const tab = desiredOrder[i]
+            if (tab.id === undefined) continue
+
+            // Re-query to get the tab's current state after previous moves shifted things.
+            const currentTab = await browser.tabs.get(tab.id)
+
+            // The tab may have left this group since the snapshot above (e.g.
+            // a concurrent grouping operation elsewhere) — forcing it to an
+            // absolute index here would re-merge it into this group. Skip it.
+            if (currentTab.groupId !== gId) continue
+
+            const targetIndex = startIdx + i
+
+            if (currentTab.index !== targetIndex) {
+              await withTabEditRetry(() => browser.tabs.move(tab.id!, { index: targetIndex }))
+              await new Promise(resolve => setTimeout(resolve, 10))
+            }
+          }
+        }
+      } catch (error) {
+        console.error("[TabSortService] Error sorting tabs by host:", error)
+      }
+    })
+  }
+
+  /**
+   * Applies host sorting if the setting is enabled.
+   * Called after grouping operations complete.
+   */
+  async applyHostSorting(): Promise<void> {
+    if (tabGroupState.groupByHost) {
+      await this.sortGroupTabsByHost()
+    }
+  }
+
+  /**
    * Applies sorting if the setting is enabled.
    * Called after grouping operations complete.
    */
@@ -332,6 +422,7 @@ class TabSortService {
       await this.sortGroups()
     }
     await this.applyContainerSorting()
+    await this.applyHostSorting()
   }
 }
 

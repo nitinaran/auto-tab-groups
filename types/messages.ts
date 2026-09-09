@@ -35,6 +35,8 @@ export type MessageAction =
   | "toggleDeferGroupingUntilSeen"
   | "getGroupByContainer"
   | "toggleGroupByContainer"
+  | "getGroupByHost"
+  | "toggleGroupByHost"
   | "getSortGroupsAlphabetically"
   | "toggleSortGroupsAlphabetically"
   | "getSortGroupsDirection"
@@ -89,6 +91,7 @@ export interface SimpleMessage extends BaseMessage {
     | "getOpenTabNextToCurrent"
     | "getDeferGroupingUntilSeen"
     | "getGroupByContainer"
+    | "getGroupByHost"
     | "getSortGroupsAlphabetically"
     | "getSortGroupsDirection"
     | "getIndexGroupTitles"
@@ -196,6 +199,14 @@ export interface ToggleGroupByContainerMessage extends BaseMessage {
 }
 
 /**
+ * Toggle reordering tabs within groups by hostname
+ */
+export interface ToggleGroupByHostMessage extends BaseMessage {
+  action: "toggleGroupByHost"
+  enabled: boolean
+}
+
+/**
  * Toggle sort groups alphabetically message
  */
 export interface ToggleSortGroupsMessage extends BaseMessage {
@@ -290,6 +301,7 @@ export type Message =
   | ToggleOpenTabNextToCurrentMessage
   | ToggleDeferGroupingMessage
   | ToggleGroupByContainerMessage
+  | ToggleGroupByHostMessage
   | ToggleSortGroupsMessage
   | SetSortGroupsDirectionMessage
   | ToggleIndexGroupTitlesMessage

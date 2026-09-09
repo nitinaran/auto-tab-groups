@@ -94,6 +94,11 @@ export interface StorageSchema {
    * Firefox Multi-Account Container are kept together.
    */
   groupByContainer: boolean
+  /**
+   * Whether to reorder tabs within each group so tabs with the same
+   * hostname are kept together.
+   */
+  groupByHost: boolean
 }
 
 /**
@@ -121,7 +126,8 @@ export const DEFAULT_STATE: StorageSchema = {
   hideContextMenu: false,
   userLocale: "auto",
   protectedGroupTitles: [],
-  groupByContainer: false
+  groupByContainer: false,
+  groupByHost: false
 }
 
 /**

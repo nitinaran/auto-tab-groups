@@ -341,6 +341,21 @@ export default defineBackground(() => {
             break
           }
 
+          case "getGroupByHost":
+            result = { enabled: tabGroupState.groupByHost }
+            break
+
+          case "toggleGroupByHost": {
+            tabGroupState.groupByHost = msg.enabled
+            await saveState()
+            if (msg.enabled) {
+              const { tabSortService } = await import("../services/TabSortService")
+              await tabSortService.sortGroupTabsByHost()
+            }
+            result = { enabled: tabGroupState.groupByHost }
+            break
+          }
+
           case "moveTabToGroupWindow":
             result = await tabGroupService.moveTabToItsGroupWindow(msg.tabId)
             break

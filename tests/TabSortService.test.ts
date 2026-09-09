@@ -517,6 +517,38 @@ describe("TabSortService", () => {
 
       expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
     })
+
+    it("should call sortGroupTabsByHost when groupByHost is enabled", async () => {
+      tabGroupState.sortGroupsAlphabetically = false
+      tabGroupState.groupByContainer = false
+      tabGroupState.groupByHost = true
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 1, groupId: 10 }) // tab 2 current position before move
+        .mockResolvedValueOnce({ index: 1, groupId: 10 }) // tab 1 current position after tab 2 moved
+
+      await tabSortService.applySorting()
+
+      // a.example.com should come before b.example.com, so tab 2 moves to index 0
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+    })
+
+    it("should not call sortGroupTabsByHost when groupByHost is disabled", async () => {
+      tabGroupState.sortGroupsAlphabetically = false
+      tabGroupState.groupByContainer = false
+      tabGroupState.groupByHost = false
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" }
+      ])
+
+      await tabSortService.applySorting()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
   })
 
   describe("sortGroupTabsByContainer", () => {
@@ -677,6 +709,174 @@ describe("TabSortService", () => {
     })
   })
 
+  describe("sortGroupTabsByHost", () => {
+    beforeEach(() => {
+      tabGroupState.groupByHost = true
+    })
+
+    it("should reorder tabs so same-host tabs are adjacent", async () => {
+      // Group 10: tab A (b.example.com), tab B (a.example.com) — wrong order
+      // Expected: tab B (a.example.com), tab A (b.example.com)
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 5, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, index: 6, url: "https://a.example.com/" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 2 current position before move
+        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 1 current position after tab 2 moved
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 5 })
+    })
+
+    it("should not move tabs already in the correct host order", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://a.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://b.example.com/" }
+      ])
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should leave a single-tab group untouched", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://a.example.com/" }
+      ])
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should treat different subdomains as different hosts", async () => {
+      // mail.example.com and docs.example.com are different hosts under
+      // the exact-hostname matching rule this feature uses.
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://mail.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://docs.example.com/" }
+      ])
+      mockBrowser.tabs.get.mockResolvedValueOnce({ index: 1, groupId: 10 })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      // docs.example.com sorts before mail.example.com
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+    })
+
+    it("should treat tabs with no URL as a shared empty host and leave them unmoved", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0 },
+        { id: 2, groupId: 10, index: 1 },
+        { id: 3, groupId: 10, index: 2 }
+      ])
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should process every group in the window when no groupId is given", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" },
+        { id: 3, groupId: 20, index: 2, url: "https://b.example.com/" },
+        { id: 4, groupId: 20, index: 3, url: "https://a.example.com/" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+        .mockResolvedValueOnce({ index: 3, groupId: 20 })
+        .mockResolvedValueOnce({ index: 3, groupId: 20 })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(2)
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(4, { index: 2 })
+    })
+
+    it("should only sort the specified group when groupId is given", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" },
+        { id: 3, groupId: 20, index: 2, url: "https://b.example.com/" },
+        { id: 4, groupId: 20, index: 3, url: "https://a.example.com/" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+
+      // Only sort group 10
+      await tabSortService.sortGroupTabsByHost(10)
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+    })
+
+    it("should skip ungrouped tabs (groupId === -1)", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: -1, index: 0, url: "https://b.example.com/" },
+        { id: 2, groupId: -1, index: 1, url: "https://a.example.com/" }
+      ])
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should keep tabs with the same host in their original relative order (stable sort)", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://a.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://b.example.com/" },
+        { id: 3, groupId: 10, index: 2, url: "https://a.example.com/" },
+        { id: 4, groupId: 10, index: 3, url: "https://b.example.com/" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 0, groupId: 10 })
+        .mockResolvedValueOnce({ index: 2, groupId: 10 })
+        .mockResolvedValueOnce({ index: 2, groupId: 10 })
+        .mockResolvedValueOnce({ index: 3, groupId: 10 })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
+    })
+
+    it("should skip a tab that has left the group since the snapshot was taken", async () => {
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" }
+      ])
+      // Tab 2 needs to move to index 0, but by the time we check its live
+      // state it has already been reassigned to a different group (e.g. a
+      // concurrent grouping operation elsewhere) — moving it now would
+      // forcibly pull it back into group 10.
+      mockBrowser.tabs.get.mockResolvedValueOnce({ index: 1, groupId: 99 })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
+    it("should handle errors gracefully without throwing", async () => {
+      mockBrowser.tabs.query.mockRejectedValue(new Error("API error"))
+
+      await expect(tabSortService.sortGroupTabsByHost()).resolves.toBeUndefined()
+    })
+
+    it("should do nothing when window has no id", async () => {
+      mockBrowser.windows.getCurrent.mockResolvedValueOnce({ id: undefined })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.query).not.toHaveBeenCalled()
+    })
+  })
+
   describe("mutex", () => {
     it("should not let two sort operations run concurrently", async () => {
       const order: string[] = []
@@ -697,9 +897,9 @@ describe("TabSortService", () => {
       })
       mockBrowser.tabs.query.mockResolvedValue([])
 
-      // Two separate calls to the same entry point, sharing the mutex
+      // Two different entry points, sharing the same mutex
       const first = tabSortService.sortGroupTabsByContainer()
-      const second = tabSortService.sortGroupTabsByContainer()
+      const second = tabSortService.sortGroupTabsByHost()
 
       // While the first call is still blocked on the gate, the second call's
       // windows.getCurrent must not have run yet — it's waiting for the mutex.

@@ -97,6 +97,15 @@ describe("TabGroupState", () => {
       expect(tabGroupState.groupByContainer).toBe(true)
     })
 
+    it("should default groupByHost to false", () => {
+      expect(tabGroupState.groupByHost).toBe(false)
+    })
+
+    it("should update groupByHost", () => {
+      tabGroupState.updateFromStorage({ groupByHost: true })
+      expect(tabGroupState.groupByHost).toBe(true)
+    })
+
     it("should update customRules", () => {
       const rules: Record<string, CustomRule> = {
         "rule-1": {

@@ -504,6 +504,15 @@
     "description": "Help text for the Keep same-container tabs together toggle."
   },
 
+  "settingGroupByHost": {
+    "message": "Keep same-host tabs together",
+    "description": "Toggle that reorders tabs within each group by hostname."
+  },
+  "settingGroupByHostHelp": {
+    "message": "Reorders tabs within each group so tabs with the same hostname are grouped together",
+    "description": "Help text for the Keep same-host tabs together toggle."
+  },
+
   "advancedSectionTitle": {
     "message": "Advanced",
     "description": "Title for the advanced settings section."
