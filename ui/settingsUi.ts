@@ -7,9 +7,10 @@
  * once. Importing this module wires up whichever document is hosting it.
  */
 
-import type { CustomRule, UserLocale } from "../types"
+import type { CustomRule, HostKeyRule, UserLocale } from "../types"
 import type { AiGroupSuggestion } from "../types/ai-messages"
 import { extractDomain } from "../utils/DomainUtils"
+import { formatHostKeyRules, parseHostKeyRules } from "../utils/HostKeyUtils"
 import {
   applyDirectionToDom,
   applyI18nToDom,
@@ -59,6 +60,7 @@ const groupByContainerBadge = document.getElementById("groupByContainerBadge") a
 
 // Host Sorting Elements
 const groupByHostToggle = document.getElementById("groupByHostToggle") as HTMLInputElement
+const hostKeyRulesInput = document.getElementById("hostKeyRulesInput") as HTMLTextAreaElement
 
 // Sorting Elements
 const sortingToggle = document.querySelector(".sorting-toggle") as HTMLButtonElement
@@ -796,6 +798,24 @@ groupByHostToggle.addEventListener("change", event => {
   sendMessage({
     action: "toggleGroupByHost",
     enabled: (event.target as HTMLInputElement).checked
+  })
+})
+
+sendMessage<{ rules?: HostKeyRule[] }>({ action: "getHostKeyRules" }).then(response => {
+  if (response?.rules) {
+    hostKeyRulesInput.value = formatHostKeyRules(response.rules)
+  }
+})
+
+hostKeyRulesInput.addEventListener("change", () => {
+  sendMessage<{ rules?: HostKeyRule[] }>({
+    action: "setHostKeyRules",
+    rules: parseHostKeyRules(hostKeyRulesInput.value)
+  }).then(response => {
+    // Show the normalised form so the user sees how their text was read
+    if (response?.rules) {
+      hostKeyRulesInput.value = formatHostKeyRules(response.rules)
+    }
   })
 })
 

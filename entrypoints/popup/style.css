@@ -767,6 +767,20 @@ input:checked + .slider:before {
   color: #6c757d;
 }
 
+.host-key-rules-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.host-key-rules-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: monospace;
+  font-size: 11px;
+}
+
 .collapse-delay-container {
   display: none;
   padding-left: 16px;

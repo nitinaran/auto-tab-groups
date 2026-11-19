@@ -158,6 +158,11 @@
           </label>
         </div>
         <div class="help-text" data-i18n="settingGroupByHostHelp">Reorders tabs within each group so tabs with the same hostname are grouped together</div>
+        <div class="host-key-rules-container">
+          <span data-i18n="settingHostKeyRules">Site rules for same-host sorting</span>
+          <textarea id="hostKeyRulesInput" class="host-key-rules-input" rows="3" spellcheck="false" data-i18n-placeholder="settingHostKeyRulesPlaceholder" placeholder="*.atlassian.net/wiki =&gt; Confluence"></textarea>
+        </div>
+        <div class="help-text" data-i18n="settingHostKeyRulesHelp">One rule per line: pattern =&gt; label. Tabs matching rules with the same label are kept together; the first matching rule wins and other tabs are kept together by hostname.</div>
         <div class="settings-info">
           <span class="info-icon">&#128204;</span>
           <span data-i18n="settingPinnedTabsNote">Pinned tabs are never grouped automatically</span>

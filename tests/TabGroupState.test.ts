@@ -106,6 +106,15 @@ describe("TabGroupState", () => {
       expect(tabGroupState.groupByHost).toBe(true)
     })
 
+    it("should default hostKeyRules to the Atlassian rules", () => {
+      expect(tabGroupState.hostKeyRules).toEqual(DEFAULT_STATE.hostKeyRules)
+    })
+
+    it("should update hostKeyRules", () => {
+      tabGroupState.updateFromStorage({ hostKeyRules: [{ pattern: "a.com", label: "A" }] })
+      expect(tabGroupState.hostKeyRules).toEqual([{ pattern: "a.com", label: "A" }])
+    })
+
     it("should update customRules", () => {
       const rules: Record<string, CustomRule> = {
         "rule-1": {

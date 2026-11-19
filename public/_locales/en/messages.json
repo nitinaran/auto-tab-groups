@@ -513,6 +513,19 @@
     "description": "Help text for the Keep same-host tabs together toggle."
   },
 
+  "settingHostKeyRules": {
+    "message": "Site rules for same-host sorting",
+    "description": "Label for the editor of rules that tell sites sharing a hostname apart by path."
+  },
+  "settingHostKeyRulesPlaceholder": {
+    "message": "*.atlassian.net/wiki => Confluence",
+    "description": "Example rule shown in the empty site rules editor. Keep the => separator."
+  },
+  "settingHostKeyRulesHelp": {
+    "message": "One rule per line: pattern => label. Tabs matching rules with the same label are kept together; the first matching rule wins and other tabs are kept together by hostname.",
+    "description": "Help text for the site rules editor."
+  },
+
   "advancedSectionTitle": {
     "message": "Advanced",
     "description": "Title for the advanced settings section."

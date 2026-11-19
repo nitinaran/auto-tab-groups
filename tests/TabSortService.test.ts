@@ -766,6 +766,61 @@ describe("TabSortService", () => {
       expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
     })
 
+    it("should keep Jira and Confluence tabs on the same Atlassian host separate (default rules)", async () => {
+      // Confluence, Jira, Confluence — interleaved on one hostname. The two
+      // Confluence tabs must end up adjacent, with Jira after them.
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://viavi.atlassian.net/wiki/spaces/ENG" },
+        { id: 2, groupId: 10, index: 1, url: "https://viavi.atlassian.net/browse/ABC-1" },
+        { id: 3, groupId: 10, index: 2, url: "https://viavi.atlassian.net/wiki" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 0, groupId: 10 })
+        .mockResolvedValueOnce({ index: 2, groupId: 10 })
+        .mockResolvedValueOnce({ index: 2, groupId: 10 })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
+    })
+
+    it("should use the configured hostKeyRules to merge and split sites by path", async () => {
+      tabGroupState.hostKeyRules = [
+        { pattern: "intranet.example.com/docs", label: "Docs" },
+        { pattern: "intranet.example.com/help", label: "Docs" },
+        { pattern: "intranet.example.com", label: "Portal" }
+      ]
+      // Docs, Portal, Docs (via /help) — the two Docs tabs must end up adjacent
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://intranet.example.com/docs/a" },
+        { id: 2, groupId: 10, index: 1, url: "https://intranet.example.com/home" },
+        { id: 3, groupId: 10, index: 2, url: "https://intranet.example.com/help/b" }
+      ])
+      mockBrowser.tabs.get
+        .mockResolvedValueOnce({ index: 0, groupId: 10 })
+        .mockResolvedValueOnce({ index: 2, groupId: 10 })
+        .mockResolvedValueOnce({ index: 1, groupId: 10 })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
+      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 2 })
+    })
+
+    it("should fall back to plain hostname sorting when hostKeyRules is empty", async () => {
+      tabGroupState.hostKeyRules = []
+      mockBrowser.tabs.query.mockResolvedValue([
+        { id: 1, groupId: 10, index: 0, url: "https://viavi.atlassian.net/wiki" },
+        { id: 2, groupId: 10, index: 1, url: "https://viavi.atlassian.net/jira" }
+      ])
+
+      await tabSortService.sortGroupTabsByHost()
+
+      // Same hostname, so nothing to reorder
+      expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+    })
+
     it("should treat tabs with no URL as a shared empty host and leave them unmoved", async () => {
       mockBrowser.tabs.query.mockResolvedValue([
         { id: 1, groupId: 10, index: 0 },

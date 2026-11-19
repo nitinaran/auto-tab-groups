@@ -4,7 +4,7 @@
 
 import type { AiMessage, AiMessageAction } from "./ai-messages"
 import type { CustomRule, RuleData, RulesExportData, RulesStats } from "./rules"
-import type { GroupByMode, SortDirection, UserLocale } from "./storage"
+import type { GroupByMode, HostKeyRule, SortDirection, UserLocale } from "./storage"
 
 /**
  * All possible message actions
@@ -37,6 +37,8 @@ export type MessageAction =
   | "toggleGroupByContainer"
   | "getGroupByHost"
   | "toggleGroupByHost"
+  | "getHostKeyRules"
+  | "setHostKeyRules"
   | "getSortGroupsAlphabetically"
   | "toggleSortGroupsAlphabetically"
   | "getSortGroupsDirection"
@@ -92,6 +94,7 @@ export interface SimpleMessage extends BaseMessage {
     | "getDeferGroupingUntilSeen"
     | "getGroupByContainer"
     | "getGroupByHost"
+    | "getHostKeyRules"
     | "getSortGroupsAlphabetically"
     | "getSortGroupsDirection"
     | "getIndexGroupTitles"
@@ -207,6 +210,14 @@ export interface ToggleGroupByHostMessage extends BaseMessage {
 }
 
 /**
+ * Replace the rules that decide which site a tab belongs to for the same-host sort
+ */
+export interface SetHostKeyRulesMessage extends BaseMessage {
+  action: "setHostKeyRules"
+  rules: HostKeyRule[]
+}
+
+/**
  * Toggle sort groups alphabetically message
  */
 export interface ToggleSortGroupsMessage extends BaseMessage {
@@ -302,6 +313,7 @@ export type Message =
   | ToggleDeferGroupingMessage
   | ToggleGroupByContainerMessage
   | ToggleGroupByHostMessage
+  | SetHostKeyRulesMessage
   | ToggleSortGroupsMessage
   | SetSortGroupsDirectionMessage
   | ToggleIndexGroupTitlesMessage

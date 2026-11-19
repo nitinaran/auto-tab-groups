@@ -27,6 +27,18 @@ export type SortDirection = "asc" | "desc"
 export type UserLocale = "auto" | "en" | "de" | "he" | "ar" | "es" | "hi" | "ru" | "zh"
 
 /**
+ * Rule that decides which "site" a tab belongs to when keeping same-host tabs
+ * together. Lets sites that serve several products from one hostname (e.g.
+ * Jira and Confluence on *.atlassian.net) be told apart by path.
+ */
+export interface HostKeyRule {
+  /** URL pattern, same syntax as custom rule domains (e.g. "*.atlassian.net/wiki") */
+  pattern: string
+  /** Tabs matching rules with the same label are kept together */
+  label: string
+}
+
+/**
  * Mapping of group titles to their colors
  */
 export type GroupColorMapping = Record<string, TabGroupColor>
@@ -99,6 +111,11 @@ export interface StorageSchema {
    * hostname are kept together.
    */
   groupByHost: boolean
+  /**
+   * Ordered rules for the same-host sort; the first matching rule's label is
+   * the tab's sort key. Tabs matching no rule are keyed by hostname.
+   */
+  hostKeyRules: HostKeyRule[]
 }
 
 /**
@@ -127,7 +144,11 @@ export const DEFAULT_STATE: StorageSchema = {
   userLocale: "auto",
   protectedGroupTitles: [],
   groupByContainer: false,
-  groupByHost: false
+  groupByHost: false,
+  hostKeyRules: [
+    { pattern: "*.atlassian.net/wiki", label: "Confluence" },
+    { pattern: "*.atlassian.net", label: "Jira" }
+  ]
 }
 
 /**

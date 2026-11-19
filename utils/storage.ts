@@ -10,6 +10,7 @@ import type {
   CustomRulesMapping,
   GroupByMode,
   GroupColorMapping,
+  HostKeyRule,
   RuleMatchingMode,
   SortDirection,
   StorageSchema,
@@ -114,6 +115,10 @@ export const groupByHost = storage.defineItem<boolean>("local:groupByHost", {
   fallback: DEFAULT_STATE.groupByHost
 })
 
+export const hostKeyRules = storage.defineItem<HostKeyRule[]>("local:hostKeyRules", {
+  fallback: DEFAULT_STATE.hostKeyRules
+})
+
 /**
  * Cached AI suggestions (survives popup reopens, not a user setting)
  */
@@ -149,7 +154,8 @@ export async function loadAllStorage(): Promise<StorageSchema> {
     protectedGroupTitlesValue,
     deferGroupingUntilSeenValue,
     groupByContainerValue,
-    groupByHostValue
+    groupByHostValue,
+    hostKeyRulesValue
   ] = await Promise.all([
     autoGroupingEnabled.getValue(),
     groupNewTabs.getValue(),
@@ -173,7 +179,8 @@ export async function loadAllStorage(): Promise<StorageSchema> {
     protectedGroupTitles.getValue(),
     deferGroupingUntilSeen.getValue(),
     groupByContainer.getValue(),
-    groupByHost.getValue()
+    groupByHost.getValue(),
+    hostKeyRules.getValue()
   ])
 
   return {
@@ -199,7 +206,8 @@ export async function loadAllStorage(): Promise<StorageSchema> {
     protectedGroupTitles: protectedGroupTitlesValue,
     deferGroupingUntilSeen: deferGroupingUntilSeenValue,
     groupByContainer: groupByContainerValue,
-    groupByHost: groupByHostValue
+    groupByHost: groupByHostValue,
+    hostKeyRules: hostKeyRulesValue
   }
 }
 
@@ -277,6 +285,9 @@ export async function saveAllStorage(data: Partial<StorageSchema>): Promise<void
   }
   if (data.groupByHost !== undefined) {
     promises.push(groupByHost.setValue(data.groupByHost))
+  }
+  if (data.hostKeyRules !== undefined) {
+    promises.push(hostKeyRules.setValue(data.hostKeyRules))
   }
   await Promise.all(promises)
 }

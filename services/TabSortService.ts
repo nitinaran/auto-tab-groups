@@ -6,6 +6,7 @@
  * and only moving groups that are actually out of place.
  */
 
+import { getHostKey } from "../utils/HostKeyUtils"
 import { withTabEditRetry } from "../utils/withTabEditRetry"
 import { tabGroupState } from "./TabGroupState"
 
@@ -20,19 +21,6 @@ interface TabGroupsWithMove {
 }
 
 const INDEX_PREFIX_PATTERN = /^\d+\. /
-
-/**
- * Extracts the hostname from a tab's URL. Returns "" for tabs with no URL
- * or an unparsable URL (e.g. internal pages some browsers restrict access to).
- */
-function getTabHost(url?: string): string {
-  if (!url) return ""
-  try {
-    return new URL(url).hostname
-  } catch {
-    return ""
-  }
-}
 
 /**
  * Strips a leading index prefix (e.g., "1. GitHub" → "GitHub").
@@ -340,8 +328,10 @@ class TabSortService {
    * Reorders tabs within each tab group so tabs with the same hostname
    * are kept together.
    *
-   * Works by stable-sorting tabs within each group by their URL's hostname,
-   * then moving any that are out of place to their target absolute index.
+   * Works by stable-sorting tabs within each group by their host key (the
+   * label of the first matching hostKeyRules entry, otherwise the URL's
+   * hostname — see getHostKey), then moving any that are out of place to
+   * their target absolute index.
    *
    * If groupId is supplied, only that group is reordered; otherwise every
    * group in the current window is processed.
@@ -366,11 +356,12 @@ class TabSortService {
 
           if (groupTabs.length <= 1) continue
 
-          // Stable sort by hostname — tabs with the same host keep their
+          // Stable sort by host key — tabs with the same host keep their
           // relative order, and end up contiguous.
-          const desiredOrder = [...groupTabs].sort((a, b) =>
-            getTabHost(a.url).localeCompare(getTabHost(b.url))
-          )
+          const desiredOrder = groupTabs
+            .map(tab => ({ tab, key: getHostKey(tab.url, tabGroupState.hostKeyRules) }))
+            .sort((a, b) => a.key.localeCompare(b.key))
+            .map(({ tab }) => tab)
 
           const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
           if (alreadySorted) continue

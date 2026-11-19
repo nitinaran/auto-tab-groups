@@ -7,6 +7,7 @@ import type {
   CustomRule,
   CustomRulesMapping,
   GroupByMode,
+  HostKeyRule,
   RuleMatchingMode,
   SortDirection,
   StorageSchema,
@@ -34,6 +35,7 @@ class TabGroupState {
   protectedGroupTitles: string[]
   groupByContainer: boolean
   groupByHost: boolean
+  hostKeyRules: HostKeyRule[]
 
   constructor() {
     this.autoGroupingEnabled = DEFAULT_STATE.autoGroupingEnabled
@@ -55,6 +57,7 @@ class TabGroupState {
     this.protectedGroupTitles = [...DEFAULT_STATE.protectedGroupTitles]
     this.groupByContainer = DEFAULT_STATE.groupByContainer
     this.groupByHost = DEFAULT_STATE.groupByHost
+    this.hostKeyRules = DEFAULT_STATE.hostKeyRules.map(rule => ({ ...rule }))
   }
 
   /**
@@ -79,6 +82,7 @@ class TabGroupState {
     this.protectedGroupTitles = data.protectedGroupTitles ?? this.protectedGroupTitles
     this.groupByContainer = data.groupByContainer ?? this.groupByContainer
     this.groupByHost = data.groupByHost ?? this.groupByHost
+    this.hostKeyRules = data.hostKeyRules ?? this.hostKeyRules
 
     this.customRules.clear()
 
@@ -114,6 +118,7 @@ class TabGroupState {
       protectedGroupTitles: this.protectedGroupTitles,
       groupByContainer: this.groupByContainer,
       groupByHost: this.groupByHost,
+      hostKeyRules: this.hostKeyRules,
       // AI settings managed by AiService, pass defaults for storage schema
       aiEnabled: DEFAULT_STATE.aiEnabled,
       aiProvider: DEFAULT_STATE.aiProvider,

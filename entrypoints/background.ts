@@ -356,6 +356,21 @@ export default defineBackground(() => {
             break
           }
 
+          case "getHostKeyRules":
+            result = { rules: tabGroupState.hostKeyRules }
+            break
+
+          case "setHostKeyRules": {
+            tabGroupState.hostKeyRules = msg.rules
+            await saveState()
+            if (tabGroupState.groupByHost) {
+              const { tabSortService } = await import("../services/TabSortService")
+              await tabSortService.sortGroupTabsByHost()
+            }
+            result = { rules: tabGroupState.hostKeyRules }
+            break
+          }
+
           case "moveTabToGroupWindow":
             result = await tabGroupService.moveTabToItsGroupWindow(msg.tabId)
             break
