@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { mockBrowser } from "./setup"
 
 vi.mock("../utils/storage", () => ({
@@ -12,6 +12,99 @@ vi.mock("../utils/storage", () => ({
 import { tabGroupState } from "../services/TabGroupState"
 import { stripIndexPrefix, tabSortService } from "../services/TabSortService"
 import { DEFAULT_STATE } from "../types/storage"
+
+interface FakeTab {
+  id: number
+  groupId: number
+  url?: string
+  cookieStoreId?: string
+}
+
+/**
+ * A stateful stand-in for the browser's tab strip. Unlike canned query
+ * results it applies moves, so tests can assert the final order. It also
+ * mimics the browser adopting a tab that is moved strictly inside another
+ * group's range, which is the behaviour the sort has to defend against.
+ */
+function installTabStrip(initial: FakeTab[]) {
+  const strip: FakeTab[] = initial.map(tab => ({ ...tab }))
+  let afterFirstGroupQueryHook: (() => void) | undefined
+
+  const view = () => strip.map((tab, index) => ({ ...tab, index }))
+
+  mockBrowser.tabs.query.mockImplementation(async (query: { groupId?: number }) => {
+    const result = view().filter(
+      tab => query.groupId === undefined || tab.groupId === query.groupId
+    )
+    if (afterFirstGroupQueryHook && query.groupId !== undefined) {
+      const hook = afterFirstGroupQueryHook
+      afterFirstGroupQueryHook = undefined
+      hook()
+    }
+    return result
+  })
+
+  mockBrowser.tabs.get.mockImplementation(async (id: number) => {
+    const tab = view().find(candidate => candidate.id === id)
+    if (!tab) throw new Error(`No tab with id ${id}`)
+    return tab
+  })
+
+  mockBrowser.tabs.move.mockImplementation(async (id: number, { index }: { index: number }) => {
+    const from = strip.findIndex(tab => tab.id === id)
+    const [tab] = strip.splice(from, 1)
+    strip.splice(index, 0, tab)
+
+    const before = strip[index - 1]
+    const after = strip[index + 1]
+    if (before && after && before.groupId !== -1 && before.groupId === after.groupId) {
+      tab.groupId = before.groupId
+    }
+    return {}
+  })
+
+  mockBrowser.tabs.group.mockImplementation(
+    async ({ tabIds, groupId }: { tabIds: number[]; groupId: number }) => {
+      for (const tab of strip) {
+        if (tabIds.includes(tab.id)) tab.groupId = groupId
+      }
+      return groupId
+    }
+  )
+
+  return {
+    order: (groupId?: number) =>
+      strip.filter(tab => groupId === undefined || tab.groupId === groupId).map(tab => tab.id),
+    groupOf: (id: number) => strip.find(tab => tab.id === id)?.groupId,
+    setGroup: (id: number, groupId: number) => {
+      const tab = strip.find(candidate => candidate.id === id)
+      if (tab) tab.groupId = groupId
+    },
+    insertAt: (index: number, tab: FakeTab) => {
+      strip.splice(index, 0, { ...tab })
+    },
+    /** Runs once, right after the first per-group tab query returns */
+    afterFirstGroupQuery: (hook: () => void) => {
+      afterFirstGroupQueryHook = hook
+    }
+  }
+}
+
+/** Drop the fake's implementations so later tests start from a blank API */
+function resetTabApi(): void {
+  for (const fn of [
+    mockBrowser.tabs.query,
+    mockBrowser.tabs.get,
+    mockBrowser.tabs.move,
+    mockBrowser.tabs.group
+  ]) {
+    fn.mockReset()
+  }
+  mockBrowser.tabs.query.mockResolvedValue([])
+  mockBrowser.tabs.get.mockResolvedValue({})
+  mockBrowser.tabs.move.mockResolvedValue({})
+  mockBrowser.tabs.group.mockResolvedValue(1)
+}
 
 describe("TabSortService", () => {
   beforeEach(() => {
@@ -556,37 +649,36 @@ describe("TabSortService", () => {
       tabGroupState.groupByContainer = true
     })
 
+    afterEach(resetTabApi)
+
+    const c1 = "firefox-container-1"
+    const c2 = "firefox-container-2"
+
     it("should reorder tabs so same-container tabs are adjacent", async () => {
-      // Group 10: tab A (container-2), tab B (container-1) — wrong order
-      // Expected: tab B (container-1), tab A (container-2)
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 5, cookieStoreId: "firefox-container-2" },
-        { id: 2, groupId: 10, index: 6, cookieStoreId: "firefox-container-1" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c2 },
+        { id: 2, groupId: 10, cookieStoreId: c1 }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 2 current position before move
-        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 1 current position after tab 2 moved
 
       await tabSortService.sortGroupTabsByContainer()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 5 })
+      expect(strip.order()).toEqual([2, 1])
     })
 
     it("should not move tabs already in the correct container order", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-1" },
-        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-2" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c1 },
+        { id: 2, groupId: 10, cookieStoreId: c2 }
       ])
 
       await tabSortService.sortGroupTabsByContainer()
 
       expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+      expect(strip.order()).toEqual([1, 2])
     })
 
     it("should leave a single-tab group untouched", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-1" }
-      ])
+      installTabStrip([{ id: 1, groupId: 10, cookieStoreId: c1 }])
 
       await tabSortService.sortGroupTabsByContainer()
 
@@ -594,61 +686,49 @@ describe("TabSortService", () => {
     })
 
     it("should be a no-op on Chrome tabs that have no cookieStoreId", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0 },
-        { id: 2, groupId: 10, index: 1 },
-        { id: 3, groupId: 10, index: 2 }
+      installTabStrip([
+        { id: 1, groupId: 10 },
+        { id: 2, groupId: 10 },
+        { id: 3, groupId: 10 }
       ])
 
       await tabSortService.sortGroupTabsByContainer()
 
-      // All tabs have the same empty container — no reordering needed
       expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
     })
 
     it("should process every group in the window when no groupId is given", async () => {
-      // Two groups, each with out-of-order containers
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
-        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" },
-        { id: 3, groupId: 20, index: 2, cookieStoreId: "firefox-container-2" },
-        { id: 4, groupId: 20, index: 3, cookieStoreId: "firefox-container-1" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c2 },
+        { id: 2, groupId: 10, cookieStoreId: c1 },
+        { id: 3, groupId: 20, cookieStoreId: c2 },
+        { id: 4, groupId: 20, cookieStoreId: c1 }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
-        .mockResolvedValueOnce({ index: 3, groupId: 20 })
-        .mockResolvedValueOnce({ index: 3, groupId: 20 })
 
       await tabSortService.sortGroupTabsByContainer()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(2)
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(4, { index: 2 })
+      expect(strip.order(10)).toEqual([2, 1])
+      expect(strip.order(20)).toEqual([4, 3])
     })
 
     it("should only sort the specified group when groupId is given", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
-        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" },
-        { id: 3, groupId: 20, index: 2, cookieStoreId: "firefox-container-2" },
-        { id: 4, groupId: 20, index: 3, cookieStoreId: "firefox-container-1" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c2 },
+        { id: 2, groupId: 10, cookieStoreId: c1 },
+        { id: 3, groupId: 20, cookieStoreId: c2 },
+        { id: 4, groupId: 20, cookieStoreId: c1 }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
 
-      // Only sort group 10
       await tabSortService.sortGroupTabsByContainer(10)
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+      expect(strip.order(10)).toEqual([2, 1])
+      expect(strip.order(20)).toEqual([3, 4])
     })
 
     it("should skip ungrouped tabs (groupId === -1)", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: -1, index: 0, cookieStoreId: "firefox-container-2" },
-        { id: 2, groupId: -1, index: 1, cookieStoreId: "firefox-container-1" }
+      installTabStrip([
+        { id: 1, groupId: -1, cookieStoreId: c2 },
+        { id: 2, groupId: -1, cookieStoreId: c1 }
       ])
 
       await tabSortService.sortGroupTabsByContainer()
@@ -657,41 +737,65 @@ describe("TabSortService", () => {
     })
 
     it("should keep tabs with the same container in their original relative order (stable sort)", async () => {
-      // Tabs 1 and 3 share container-1; tabs 2 and 4 share container-2
-      // After sort: container-1 first (tabs 1, 3), then container-2 (tabs 2, 4)
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-1" },
-        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-2" },
-        { id: 3, groupId: 10, index: 2, cookieStoreId: "firefox-container-1" },
-        { id: 4, groupId: 10, index: 3, cookieStoreId: "firefox-container-2" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c1 },
+        { id: 2, groupId: 10, cookieStoreId: c2 },
+        { id: 3, groupId: 10, cookieStoreId: c1 },
+        { id: 4, groupId: 10, cookieStoreId: c2 }
       ])
-      // After stable sort: [1(c1), 3(c1), 2(c2), 4(c2)] — needs moves
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 0, groupId: 10 }) // tab 1 already at 0, no move
-        .mockResolvedValueOnce({ index: 2, groupId: 10 }) // tab 3 currently at 2, needs to go to 1
-        .mockResolvedValueOnce({ index: 2, groupId: 10 }) // tab 2 now at 2 after shift, goes to 2 (no move)
-        .mockResolvedValueOnce({ index: 3, groupId: 10 }) // tab 4 at 3, goes to 3 (no move)
 
       await tabSortService.sortGroupTabsByContainer()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
+      expect(strip.order()).toEqual([1, 3, 2, 4])
       expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
     })
 
     it("should skip a tab that has left the group since the snapshot was taken", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, cookieStoreId: "firefox-container-2" },
-        { id: 2, groupId: 10, index: 1, cookieStoreId: "firefox-container-1" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c2 },
+        { id: 2, groupId: 10, cookieStoreId: c1 }
       ])
-      // Tab 2 needs to move to index 0, but by the time we check its live
-      // state it has already been reassigned to a different group (e.g. a
-      // concurrent grouping operation elsewhere) — moving it now would
-      // forcibly pull it back into group 10.
-      mockBrowser.tabs.get.mockResolvedValueOnce({ index: 1, groupId: 99 })
+      // Tab 2 is reassigned to another group right after the snapshot —
+      // moving it now would forcibly pull it back into group 10.
+      strip.afterFirstGroupQuery(() => strip.setGroup(2, 99))
 
       await tabSortService.sortGroupTabsByContainer()
 
       expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+      expect(strip.groupOf(2)).toBe(99)
+    })
+
+    it("should keep every tab in its group when a neighbouring group grows mid-sort", async () => {
+      // Group 1 is just before group 2. A tab joins group 1 after the snapshot
+      // was taken, shifting where group 2 starts. A move to the stale start
+      // index would land inside group 1 and the browser would adopt the tab.
+      const strip = installTabStrip([
+        { id: 100, groupId: 1 },
+        { id: 1, groupId: 2, cookieStoreId: c2 },
+        { id: 2, groupId: 2, cookieStoreId: c1 }
+      ])
+      strip.afterFirstGroupQuery(() => strip.insertAt(1, { id: 101, groupId: 1 }))
+
+      await tabSortService.sortGroupTabsByContainer(2)
+
+      expect(strip.order(2)).toEqual([2, 1])
+      expect(strip.order(1)).toEqual([100, 101])
+    })
+
+    it("should put a tab back if the browser pulls it into another group anyway", async () => {
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, cookieStoreId: c2 },
+        { id: 2, groupId: 10, cookieStoreId: c1 }
+      ])
+      mockBrowser.tabs.move.mockImplementationOnce(async (id: number) => {
+        strip.setGroup(id, 99)
+        return {}
+      })
+
+      await tabSortService.sortGroupTabsByContainer()
+
+      expect(mockBrowser.tabs.group).toHaveBeenCalledWith({ tabIds: [2], groupId: 10 })
+      expect(strip.groupOf(2)).toBe(10)
     })
 
     it("should handle errors gracefully without throwing", async () => {
@@ -714,26 +818,23 @@ describe("TabSortService", () => {
       tabGroupState.groupByHost = true
     })
 
+    afterEach(resetTabApi)
+
     it("should reorder tabs so same-host tabs are adjacent", async () => {
-      // Group 10: tab A (b.example.com), tab B (a.example.com) — wrong order
-      // Expected: tab B (a.example.com), tab A (b.example.com)
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 5, url: "https://b.example.com/" },
-        { id: 2, groupId: 10, index: 6, url: "https://a.example.com/" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, url: "https://a.example.com/" }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 2 current position before move
-        .mockResolvedValueOnce({ index: 6, groupId: 10 }) // tab 1 current position after tab 2 moved
 
       await tabSortService.sortGroupTabsByHost()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 5 })
+      expect(strip.order()).toEqual([2, 1])
     })
 
     it("should not move tabs already in the correct host order", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://a.example.com/" },
-        { id: 2, groupId: 10, index: 1, url: "https://b.example.com/" }
+      installTabStrip([
+        { id: 1, groupId: 10, url: "https://a.example.com/" },
+        { id: 2, groupId: 10, url: "https://b.example.com/" }
       ])
 
       await tabSortService.sortGroupTabsByHost()
@@ -742,9 +843,7 @@ describe("TabSortService", () => {
     })
 
     it("should leave a single-tab group untouched", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://a.example.com/" }
-      ])
+      installTabStrip([{ id: 1, groupId: 10, url: "https://a.example.com/" }])
 
       await tabSortService.sortGroupTabsByHost()
 
@@ -752,37 +851,30 @@ describe("TabSortService", () => {
     })
 
     it("should treat different subdomains as different hosts", async () => {
-      // mail.example.com and docs.example.com are different hosts under
-      // the exact-hostname matching rule this feature uses.
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://mail.example.com/" },
-        { id: 2, groupId: 10, index: 1, url: "https://docs.example.com/" }
+      // docs.example.com sorts before mail.example.com
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://mail.example.com/" },
+        { id: 2, groupId: 10, url: "https://docs.example.com/" }
       ])
-      mockBrowser.tabs.get.mockResolvedValueOnce({ index: 1, groupId: 10 })
 
       await tabSortService.sortGroupTabsByHost()
 
-      // docs.example.com sorts before mail.example.com
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+      expect(strip.order()).toEqual([2, 1])
     })
 
     it("should keep Jira and Confluence tabs on the same Atlassian host separate (default rules)", async () => {
       // Confluence, Jira, Confluence — interleaved on one hostname. The two
       // Confluence tabs must end up adjacent, with Jira after them.
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://viavi.atlassian.net/wiki/spaces/ENG" },
-        { id: 2, groupId: 10, index: 1, url: "https://viavi.atlassian.net/browse/ABC-1" },
-        { id: 3, groupId: 10, index: 2, url: "https://viavi.atlassian.net/wiki" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://viavi.atlassian.net/wiki/spaces/ENG" },
+        { id: 2, groupId: 10, url: "https://viavi.atlassian.net/browse/ABC-1" },
+        { id: 3, groupId: 10, url: "https://viavi.atlassian.net/wiki" }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 0, groupId: 10 })
-        .mockResolvedValueOnce({ index: 2, groupId: 10 })
-        .mockResolvedValueOnce({ index: 2, groupId: 10 })
 
       await tabSortService.sortGroupTabsByHost()
 
+      expect(strip.order()).toEqual([1, 3, 2])
       expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
     })
 
     it("should use the configured hostKeyRules to merge and split sites by path", async () => {
@@ -792,27 +884,22 @@ describe("TabSortService", () => {
         { pattern: "intranet.example.com", label: "Portal" }
       ]
       // Docs, Portal, Docs (via /help) — the two Docs tabs must end up adjacent
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://intranet.example.com/docs/a" },
-        { id: 2, groupId: 10, index: 1, url: "https://intranet.example.com/home" },
-        { id: 3, groupId: 10, index: 2, url: "https://intranet.example.com/help/b" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://intranet.example.com/docs/a" },
+        { id: 2, groupId: 10, url: "https://intranet.example.com/home" },
+        { id: 3, groupId: 10, url: "https://intranet.example.com/help/b" }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 0, groupId: 10 })
-        .mockResolvedValueOnce({ index: 2, groupId: 10 })
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
 
       await tabSortService.sortGroupTabsByHost()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 2 })
+      expect(strip.order()).toEqual([1, 3, 2])
     })
 
     it("should fall back to plain hostname sorting when hostKeyRules is empty", async () => {
       tabGroupState.hostKeyRules = []
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://viavi.atlassian.net/wiki" },
-        { id: 2, groupId: 10, index: 1, url: "https://viavi.atlassian.net/jira" }
+      installTabStrip([
+        { id: 1, groupId: 10, url: "https://viavi.atlassian.net/wiki" },
+        { id: 2, groupId: 10, url: "https://viavi.atlassian.net/jira" }
       ])
 
       await tabSortService.sortGroupTabsByHost()
@@ -822,10 +909,10 @@ describe("TabSortService", () => {
     })
 
     it("should treat tabs with no URL as a shared empty host and leave them unmoved", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0 },
-        { id: 2, groupId: 10, index: 1 },
-        { id: 3, groupId: 10, index: 2 }
+      installTabStrip([
+        { id: 1, groupId: 10 },
+        { id: 2, groupId: 10 },
+        { id: 3, groupId: 10 }
       ])
 
       await tabSortService.sortGroupTabsByHost()
@@ -834,47 +921,37 @@ describe("TabSortService", () => {
     })
 
     it("should process every group in the window when no groupId is given", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
-        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" },
-        { id: 3, groupId: 20, index: 2, url: "https://b.example.com/" },
-        { id: 4, groupId: 20, index: 3, url: "https://a.example.com/" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, url: "https://a.example.com/" },
+        { id: 3, groupId: 20, url: "https://b.example.com/" },
+        { id: 4, groupId: 20, url: "https://a.example.com/" }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
-        .mockResolvedValueOnce({ index: 3, groupId: 20 })
-        .mockResolvedValueOnce({ index: 3, groupId: 20 })
 
       await tabSortService.sortGroupTabsByHost()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(2)
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(4, { index: 2 })
+      expect(strip.order(10)).toEqual([2, 1])
+      expect(strip.order(20)).toEqual([4, 3])
     })
 
     it("should only sort the specified group when groupId is given", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
-        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" },
-        { id: 3, groupId: 20, index: 2, url: "https://b.example.com/" },
-        { id: 4, groupId: 20, index: 3, url: "https://a.example.com/" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, url: "https://a.example.com/" },
+        { id: 3, groupId: 20, url: "https://b.example.com/" },
+        { id: 4, groupId: 20, url: "https://a.example.com/" }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
-        .mockResolvedValueOnce({ index: 1, groupId: 10 })
 
-      // Only sort group 10
       await tabSortService.sortGroupTabsByHost(10)
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(2, { index: 0 })
+      expect(strip.order(10)).toEqual([2, 1])
+      expect(strip.order(20)).toEqual([3, 4])
     })
 
     it("should skip ungrouped tabs (groupId === -1)", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: -1, index: 0, url: "https://b.example.com/" },
-        { id: 2, groupId: -1, index: 1, url: "https://a.example.com/" }
+      installTabStrip([
+        { id: 1, groupId: -1, url: "https://b.example.com/" },
+        { id: 2, groupId: -1, url: "https://a.example.com/" }
       ])
 
       await tabSortService.sortGroupTabsByHost()
@@ -883,38 +960,67 @@ describe("TabSortService", () => {
     })
 
     it("should keep tabs with the same host in their original relative order (stable sort)", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://a.example.com/" },
-        { id: 2, groupId: 10, index: 1, url: "https://b.example.com/" },
-        { id: 3, groupId: 10, index: 2, url: "https://a.example.com/" },
-        { id: 4, groupId: 10, index: 3, url: "https://b.example.com/" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://a.example.com/" },
+        { id: 2, groupId: 10, url: "https://b.example.com/" },
+        { id: 3, groupId: 10, url: "https://a.example.com/" },
+        { id: 4, groupId: 10, url: "https://b.example.com/" }
       ])
-      mockBrowser.tabs.get
-        .mockResolvedValueOnce({ index: 0, groupId: 10 })
-        .mockResolvedValueOnce({ index: 2, groupId: 10 })
-        .mockResolvedValueOnce({ index: 2, groupId: 10 })
-        .mockResolvedValueOnce({ index: 3, groupId: 10 })
 
       await tabSortService.sortGroupTabsByHost()
 
-      expect(mockBrowser.tabs.move).toHaveBeenCalledWith(3, { index: 1 })
+      expect(strip.order()).toEqual([1, 3, 2, 4])
       expect(mockBrowser.tabs.move).toHaveBeenCalledTimes(1)
     })
 
     it("should skip a tab that has left the group since the snapshot was taken", async () => {
-      mockBrowser.tabs.query.mockResolvedValue([
-        { id: 1, groupId: 10, index: 0, url: "https://b.example.com/" },
-        { id: 2, groupId: 10, index: 1, url: "https://a.example.com/" }
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, url: "https://a.example.com/" }
       ])
-      // Tab 2 needs to move to index 0, but by the time we check its live
-      // state it has already been reassigned to a different group (e.g. a
-      // concurrent grouping operation elsewhere) — moving it now would
-      // forcibly pull it back into group 10.
-      mockBrowser.tabs.get.mockResolvedValueOnce({ index: 1, groupId: 99 })
+      // Tab 2 is reassigned to another group right after the snapshot —
+      // moving it now would forcibly pull it back into group 10.
+      strip.afterFirstGroupQuery(() => strip.setGroup(2, 99))
 
       await tabSortService.sortGroupTabsByHost()
 
       expect(mockBrowser.tabs.move).not.toHaveBeenCalled()
+      expect(strip.groupOf(2)).toBe(99)
+    })
+
+    it("should keep every tab in its group when a neighbouring group grows mid-sort", async () => {
+      // Group 1 is just before group 2. A tab joins group 1 after the snapshot
+      // was taken, shifting where group 2 starts. A move to the stale start
+      // index would land inside group 1 and the browser would adopt the tab.
+      const strip = installTabStrip([
+        { id: 100, groupId: 1, url: "about:blank" },
+        { id: 1, groupId: 2, url: "https://b.example.com/" },
+        { id: 2, groupId: 2, url: "https://a.example.com/" }
+      ])
+      strip.afterFirstGroupQuery(() =>
+        strip.insertAt(1, { id: 101, groupId: 1, url: "about:blank" })
+      )
+
+      await tabSortService.sortGroupTabsByHost(2)
+
+      expect(strip.order(2)).toEqual([2, 1])
+      expect(strip.order(1)).toEqual([100, 101])
+    })
+
+    it("should put a tab back if the browser pulls it into another group anyway", async () => {
+      const strip = installTabStrip([
+        { id: 1, groupId: 10, url: "https://b.example.com/" },
+        { id: 2, groupId: 10, url: "https://a.example.com/" }
+      ])
+      mockBrowser.tabs.move.mockImplementationOnce(async (id: number) => {
+        strip.setGroup(id, 99)
+        return {}
+      })
+
+      await tabSortService.sortGroupTabsByHost()
+
+      expect(mockBrowser.tabs.group).toHaveBeenCalledWith({ tabIds: [2], groupId: 10 })
+      expect(strip.groupOf(2)).toBe(10)
     })
 
     it("should handle errors gracefully without throwing", async () => {

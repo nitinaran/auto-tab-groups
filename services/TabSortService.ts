@@ -244,6 +244,57 @@ class TabSortService {
   }
 
   /**
+   * Moves a group's tabs into the given order.
+   *
+   * Every move is planned against the group's live position, not a snapshot:
+   * other tabs can join or leave neighbouring groups while this runs, which
+   * shifts where this group starts. A stale start index lands the move inside
+   * the neighbour's range, and the browser then adopts the tab into that
+   * neighbour. So before each move the group is re-read, the target is
+   * clamped into the group's current index range (a move inside the range can
+   * never change the tab's group), and a tab that is adopted anyway is put
+   * back. Tabs that have left the group since the snapshot are skipped.
+   */
+  private async applyGroupOrder(
+    windowId: number,
+    groupId: number,
+    desiredOrder: Browser.tabs.Tab[]
+  ): Promise<void> {
+    const desiredIds = desiredOrder
+      .map(tab => tab.id)
+      .filter((id): id is number => id !== undefined)
+
+    for (const tabId of desiredIds) {
+      const live = (await browser.tabs.query({ windowId, groupId })).sort(
+        (a, b) => (a.index ?? 0) - (b.index ?? 0)
+      )
+      const current = live.find(tab => tab.id === tabId)
+      if (!current) continue
+
+      const liveIds = new Set(live.map(tab => tab.id))
+      const position = desiredIds.filter(id => liveIds.has(id)).indexOf(tabId)
+      const start = live[0].index ?? 0
+      const end = live[live.length - 1].index ?? start
+      const targetIndex = Math.min(Math.max(start + position, start), end)
+
+      if (current.index === targetIndex) continue
+
+      await withTabEditRetry(() => browser.tabs.move(tabId, { index: targetIndex }))
+
+      const moved = await browser.tabs.get(tabId)
+      if (moved.groupId !== groupId) {
+        console.warn(`[TabSortService] Tab ${tabId} was pulled out of group ${groupId}, restoring`)
+        try {
+          await withTabEditRetry(() => browser.tabs.group({ tabIds: [tabId], groupId }))
+        } catch (error) {
+          console.error(`[TabSortService] Could not restore tab ${tabId}:`, error)
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
+
+  /**
    * Reorders tabs within each tab group so tabs from the same Firefox
    * Multi-Account Container (cookieStoreId) are kept together.
    *
@@ -286,27 +337,7 @@ class TabSortService {
           const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
           if (alreadySorted) continue
 
-          const startIdx = groupTabs[0].index ?? 0
-
-          for (let i = 0; i < desiredOrder.length; i++) {
-            const tab = desiredOrder[i]
-            if (tab.id === undefined) continue
-
-            // Re-query to get the tab's current state after previous moves shifted things.
-            const currentTab = await browser.tabs.get(tab.id)
-
-            // The tab may have left this group since the snapshot above (e.g.
-            // a concurrent grouping operation elsewhere) — forcing it to an
-            // absolute index here would re-merge it into this group. Skip it.
-            if (currentTab.groupId !== gId) continue
-
-            const targetIndex = startIdx + i
-
-            if (currentTab.index !== targetIndex) {
-              await withTabEditRetry(() => browser.tabs.move(tab.id!, { index: targetIndex }))
-              await new Promise(resolve => setTimeout(resolve, 10))
-            }
-          }
+          await this.applyGroupOrder(windowId, gId, desiredOrder)
         }
       } catch (error) {
         console.error("[TabSortService] Error sorting tabs by container:", error)
@@ -366,27 +397,7 @@ class TabSortService {
           const alreadySorted = groupTabs.every((tab, i) => tab.id === desiredOrder[i].id)
           if (alreadySorted) continue
 
-          const startIdx = groupTabs[0].index ?? 0
-
-          for (let i = 0; i < desiredOrder.length; i++) {
-            const tab = desiredOrder[i]
-            if (tab.id === undefined) continue
-
-            // Re-query to get the tab's current state after previous moves shifted things.
-            const currentTab = await browser.tabs.get(tab.id)
-
-            // The tab may have left this group since the snapshot above (e.g.
-            // a concurrent grouping operation elsewhere) — forcing it to an
-            // absolute index here would re-merge it into this group. Skip it.
-            if (currentTab.groupId !== gId) continue
-
-            const targetIndex = startIdx + i
-
-            if (currentTab.index !== targetIndex) {
-              await withTabEditRetry(() => browser.tabs.move(tab.id!, { index: targetIndex }))
-              await new Promise(resolve => setTimeout(resolve, 10))
-            }
-          }
+          await this.applyGroupOrder(windowId, gId, desiredOrder)
         }
       } catch (error) {
         console.error("[TabSortService] Error sorting tabs by host:", error)
