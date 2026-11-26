@@ -14,16 +14,32 @@ import { tabGroupState } from "./TabGroupState"
 import { stripIndexPrefix, tabSortService } from "./TabSortService"
 
 /**
+ * One group's tabs moving to the window that already holds most of that group
+ */
+export interface ConsolidationMove {
+  title: string
+  fromWindowId: number
+  toWindowId: number
+  tabIds: number[]
+}
+
+/**
  * Collapse state result
  */
 interface CollapseState {
   isCollapsed: boolean
 }
 
+/** Put a moved-out tab back at most this many times per window (#109) */
+const MAX_REFILES = 3
+const REFILE_WINDOW_MS = 60_000
+
 class TabGroupServiceSimplified {
   private recentlyCreatedTabIds = new Set<number>()
   private processingTabs = new Set<number>()
   private pendingReprocessTabs = new Set<number>()
+  // ponytail: entries for closed tabs linger until the service worker restarts; tiny
+  private refileTimes = new Map<number, number[]>()
   private bulkOperationInProgress = false
 
   markAsNewTab(tabId: number): void {
@@ -160,7 +176,7 @@ class TabGroupServiceSimplified {
       }
 
       // Check blacklist rules — if matched, ungroup the tab and skip all grouping
-      const blacklistMatch = await rulesService.findBlacklistMatch(tab.url || "")
+      const blacklistMatch = await rulesService.findBlacklistMatch(tab.url || "", tab.title)
       if (blacklistMatch) {
         console.log(
           `[TabGroupService] Tab ${tabId} matches blacklist rule "${blacklistMatch.name}", skipping grouping`
@@ -173,7 +189,7 @@ class TabGroupServiceSimplified {
 
       // Handle rules-only mode
       if (tabGroupState.groupByMode === "rules-only") {
-        const customRule = await rulesService.findMatchingRule(tab.url || "")
+        const customRule = await rulesService.findMatchingRule(tab.url || "", tab.title)
 
         // Handle system URLs
         const domain = extractDomain(tab.url || "", false)
@@ -183,7 +199,8 @@ class TabGroupServiceSimplified {
         }
 
         // Nothing matched — fall back to a catch-all ("*") rule if the user has one
-        const effectiveRule = customRule ?? (await rulesService.findCatchAllRule(tab.url || ""))
+        const effectiveRule =
+          customRule ?? (await rulesService.findCatchAllRule(tab.url || "", tab.title))
 
         if (!effectiveRule) {
           console.log(`[TabGroupService] Rules-only mode: No rule found for ${tab.url}`)
@@ -201,7 +218,7 @@ class TabGroupServiceSimplified {
         return false
       }
 
-      const customRule = await rulesService.findMatchingRule(tab.url || "")
+      const customRule = await rulesService.findMatchingRule(tab.url || "", tab.title)
 
       console.log(`[TabGroupService] Expected group title: "${expectedTitle}"`)
 
@@ -242,6 +259,56 @@ class TabGroupServiceSimplified {
   }
 
   /**
+   * Whether a group is one this extension would have built itself.
+   *
+   * Other extensions create and manage their own tab groups, and they often
+   * name them per session, so no title list can protect them (#96). The
+   * cheapest reliable signal is the title: if it is not a title Auto Tab
+   * Groups produces, the group belongs to someone else and we leave it alone.
+   *
+   * A title counts as ours when it is "System", an enabled rule's name, a
+   * title we have created before, or the title a tab currently in the group
+   * would be filed under. Untitled groups are never ours — every group this
+   * extension creates gets a title.
+   */
+  private async isOwnGroup(
+    group: Pick<Browser.tabGroups.TabGroup, "title">,
+    tabsInGroup: Browser.tabs.Tab[]
+  ): Promise<boolean> {
+    const title = stripIndexPrefix(group.title || "")
+    if (!title) return false
+    if (title === "System") return true
+
+    const rules = Object.values(tabGroupState.getCustomRulesObject())
+    if (rules.some(rule => rule.enabled && rule.name === title)) return true
+
+    // Creating a group records its colour under its title, which makes the
+    // colour mapping a ledger of every title this extension has produced —
+    // it still recognises our group after its last tab navigates elsewhere.
+    if (await getGroupColor(title)) return true
+
+    for (const tab of tabsInGroup) {
+      if ((await this.getExpectedGroupTitle(tab)) === title) return true
+    }
+
+    return false
+  }
+
+  /**
+   * isOwnGroup for a group we only have the id of. Errs on "not ours", so a
+   * group that disappears mid-read is left alone rather than dismantled.
+   */
+  private async isOwnGroupId(groupId: number): Promise<boolean> {
+    try {
+      const group = await browser.tabGroups.get(groupId)
+      const tabs = await browser.tabs.query({ groupId })
+      return await this.isOwnGroup(group, tabs)
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Ids of every protected group in the current window
    */
   private async getProtectedGroupIds(): Promise<Set<number>> {
@@ -253,6 +320,132 @@ class TabGroupServiceSimplified {
   }
 
   /**
+   * One group's worth of tabs that would move to another window.
+   */
+  private buildConsolidationMove(
+    group: Browser.tabGroups.TabGroup,
+    target: { windowId: number; groupId: number },
+    tabs: Browser.tabs.Tab[]
+  ): ConsolidationMove | null {
+    const tabIds = tabs
+      .filter(tab => tab.groupId === group.id && !tab.pinned && tab.id !== undefined)
+      .map(tab => tab.id as number)
+
+    if (tabIds.length === 0) return null
+
+    return {
+      title: stripIndexPrefix(group.title || ""),
+      fromWindowId: group.windowId,
+      toWindowId: target.windowId,
+      tabIds
+    }
+  }
+
+  /**
+   * Works out which groups are split across windows, and where each one would
+   * end up if they were merged.
+   *
+   * A group's home is the window already holding most of its tabs, decided up
+   * front so it can't shift while tabs are moving. Deliberately keyed on the
+   * group title rather than on rules: this merges groups that already exist,
+   * so the question is which window owns a title, not where a URL belongs.
+   */
+  async planGroupConsolidation(): Promise<ConsolidationMove[]> {
+    try {
+      if (!browser.tabGroups) return []
+
+      const groups = await browser.tabGroups.query({})
+      const tabs = await browser.tabs.query({})
+
+      const sizeOf = new Map<number, number>()
+      for (const tab of tabs) {
+        if (tab.groupId && tab.groupId !== -1) {
+          sizeOf.set(tab.groupId, (sizeOf.get(tab.groupId) ?? 0) + 1)
+        }
+      }
+
+      const home = new Map<string, { windowId: number; groupId: number; size: number }>()
+      for (const group of groups) {
+        const title = stripIndexPrefix(group.title || "")
+        if (!title) continue
+
+        // "Never auto-group this" should also mean "don't haul it between
+        // windows in a bulk sweep". System is the extension's own bucket for
+        // browser pages, not a topic anyone arranges windows around.
+        if (title === "System" || this.isProtectedTitle(title)) continue
+
+        const size = sizeOf.get(group.id) ?? 0
+        const best = home.get(title)
+        if (!best || size > best.size || (size === best.size && group.id < best.groupId)) {
+          home.set(title, { windowId: group.windowId, groupId: group.id, size })
+        }
+      }
+
+      const moves: ConsolidationMove[] = []
+      for (const group of groups) {
+        const target = home.get(stripIndexPrefix(group.title || ""))
+        if (!target || target.windowId === group.windowId) continue
+
+        const move = this.buildConsolidationMove(group, target, tabs)
+        if (move) moves.push(move)
+      }
+
+      return moves
+    } catch (error) {
+      console.error(`[TabGroupService] Error planning group consolidation:`, error)
+      return []
+    }
+  }
+
+  /**
+   * Merges every group that is split across windows into a single window each.
+   *
+   * Recomputes the plan rather than replaying one the UI captured earlier:
+   * group ids go stale as soon as anything moves, and "consolidate everything
+   * as it is now" is the honest reading of the button.
+   *
+   * There is no undo — nothing records where a tab came from — which is why
+   * the UI shows the plan and asks before calling this.
+   */
+  async consolidateGroups(): Promise<{ movedTabs: number; movedGroups: number }> {
+    const moves = await this.planGroupConsolidation()
+    if (moves.length === 0) return { movedTabs: 0, movedGroups: 0 }
+
+    this.bulkOperationInProgress = true
+    try {
+      let movedTabs = 0
+      let movedGroups = 0
+
+      for (const move of moves) {
+        try {
+          const target = (await browser.tabGroups.query({ windowId: move.toWindowId })).find(
+            group => stripIndexPrefix(group.title || "") === move.title
+          )
+          if (!target) continue
+
+          const tabIds = move.tabIds as [number, ...number[]]
+          await withTabEditRetry(() =>
+            browser.tabs.move(tabIds, { windowId: move.toWindowId, index: -1 })
+          )
+          await withTabEditRetry(() => browser.tabs.group({ tabIds, groupId: target.id }))
+
+          movedTabs += move.tabIds.length
+          movedGroups += 1
+        } catch (error) {
+          // One group failing shouldn't strand the rest half-done
+          console.error(`[TabGroupService] Could not consolidate "${move.title}":`, error)
+        }
+      }
+
+      console.log(`[TabGroupService] Consolidated ${movedGroups} group(s), ${movedTabs} tab(s)`)
+      return { movedTabs, movedGroups }
+    } finally {
+      this.bulkOperationInProgress = false
+      await tabSortService.applySorting()
+    }
+  }
+
+  /**
    * The group title this tab would be filed under, or null if it wouldn't be.
    *
    * Shared with the "move to its group's window" command so a manual move and
@@ -260,15 +453,16 @@ class TabGroupServiceSimplified {
    */
   async getExpectedGroupTitle(tab: Browser.tabs.Tab): Promise<string | null> {
     const url = tab.url || ""
+    const title = tab.title
 
     if (tabGroupState.groupByMode === "rules-only") {
-      const customRule = await rulesService.findMatchingRule(url)
+      const customRule = await rulesService.findMatchingRule(url, title)
 
       if (!customRule && extractDomain(url, false) === "system") {
         return tabGroupState.systemGroupEnabled ? "System" : null
       }
 
-      const effectiveRule = customRule ?? (await rulesService.findCatchAllRule(url))
+      const effectiveRule = customRule ?? (await rulesService.findCatchAllRule(url, title))
       if (!effectiveRule) return null
 
       return effectiveRule.effectiveGroupName || effectiveRule.name
@@ -277,7 +471,7 @@ class TabGroupServiceSimplified {
     const domain = extractDomain(url, tabGroupState.groupByMode === "subdomain")
     if (!domain) return null
 
-    const customRule = await rulesService.findMatchingRule(url)
+    const customRule = await rulesService.findMatchingRule(url, title)
     return customRule
       ? customRule.effectiveGroupName || customRule.name
       : getDomainDisplayName(domain)
@@ -367,7 +561,7 @@ class TabGroupServiceSimplified {
         if (tab.pinned) continue
 
         // Skip blacklisted tabs from count
-        const blacklisted = await rulesService.findBlacklistMatch(tab.url || "")
+        const blacklisted = await rulesService.findBlacklistMatch(tab.url || "", tab.title)
         if (blacklisted) continue
 
         if (customRule) {
@@ -379,13 +573,13 @@ class TabGroupServiceSimplified {
           // will happily group itself. Harmless — over-counting only makes the
           // leftovers group easier to form, and its minimum is usually 1.
           const isCatchAll = rulesService.isCatchAllRule(customRule)
-          if (isCatchAll && (await rulesService.findMatchingRule(tab.url || ""))) {
+          if (isCatchAll && (await rulesService.findMatchingRule(tab.url || "", tab.title))) {
             continue
           }
 
           const matchingRule = isCatchAll
-            ? await rulesService.findCatchAllRule(tab.url || "")
-            : await rulesService.findMatchingRule(tab.url || "")
+            ? await rulesService.findCatchAllRule(tab.url || "", tab.title)
+            : await rulesService.findMatchingRule(tab.url || "", tab.title)
           const matchGroupName = matchingRule
             ? matchingRule.effectiveGroupName || matchingRule.name
             : null
@@ -489,7 +683,7 @@ class TabGroupServiceSimplified {
 
       // A tab that can't form its own group is exactly what a catch-all rule is for
       if (allowCatchAllFallback) {
-        const catchAll = await rulesService.findCatchAllRule(tab.url || "")
+        const catchAll = await rulesService.findCatchAllRule(tab.url || "", tab.title)
         const catchAllTitle = catchAll ? catchAll.effectiveGroupName || catchAll.name : null
 
         if (catchAllTitle && catchAllTitle !== expectedTitle) {
@@ -498,7 +692,9 @@ class TabGroupServiceSimplified {
         }
       }
 
-      if (tab.groupId && tab.groupId !== -1) {
+      // Only pull the tab out of a group we built. A group another extension
+      // owns must survive its tabs navigating around (#96).
+      if (tab.groupId && tab.groupId !== -1 && (await this.isOwnGroupId(tab.groupId))) {
         await withTabEditRetry(() => browser.tabs.ungroup([tabId]))
       }
 
@@ -565,12 +761,18 @@ class TabGroupServiceSimplified {
         }
 
         // Skip blacklisted tabs
-        const blacklisted = await rulesService.findBlacklistMatch(otherTab.url || "")
+        const blacklisted = await rulesService.findBlacklistMatch(
+          otherTab.url || "",
+          otherTab.title
+        )
         if (blacklisted) continue
 
         let shouldGroup = false
         if (customRule) {
-          const matchingRule = await rulesService.findMatchingRule(otherTab.url || "")
+          const matchingRule = await rulesService.findMatchingRule(
+            otherTab.url || "",
+            otherTab.title
+          )
           shouldGroup = !!matchingRule && matchingRule.name === customRule.name
         } else {
           const includeSubDomain = tabGroupState.groupByMode === "subdomain"
@@ -782,7 +984,20 @@ class TabGroupServiceSimplified {
       const minimumTabs = this.getEffectiveMinimumTabs(customRule)
       if (minimumTabs <= 1) return false
 
+      if (this.isProtectedTitle(group.title)) {
+        console.log(`[TabGroupService] Group "${group.title}" is protected, leaving it alone`)
+        return false
+      }
+
       const tabs = await browser.tabs.query({ groupId })
+
+      // The sweep runs over every group in the window, including ones other
+      // extensions or the user created — disbanding those is not ours to do.
+      if (!(await this.isOwnGroup(group, tabs))) {
+        console.log(`[TabGroupService] Group "${group.title}" was not created by us, skipping`)
+        return false
+      }
+
       const tabCount = tabs.filter(tab => !tab.pinned).length
 
       if (tabCount < minimumTabs) {
@@ -856,23 +1071,25 @@ class TabGroupServiceSimplified {
    * Moves a tab to the correct group
    */
   async moveTabToGroup(tabId: number): Promise<boolean> {
-    return await this.handleTabUpdate(tabId)
-  }
+    // Something else (another extension, a browser feature) can keep pulling
+    // the same tab out. Putting it back every time makes it blink in and out
+    // of the group forever (#109), so after a few tries we let it be, and pick
+    // it up again once it has been left alone for a minute.
+    const now = Date.now()
+    const recent = (this.refileTimes.get(tabId) ?? []).filter(t => now - t < REFILE_WINDOW_MS)
 
-  /**
-   * Gets the domain for a given group
-   */
-  async getGroupDomain(groupId: number): Promise<string | null> {
-    try {
-      const tabs = await browser.tabs.query({ groupId })
-      if (tabs.length === 0) return null
-
-      const includeSubDomain = tabGroupState.groupByMode === "subdomain"
-      return extractDomain(tabs[0].url || "", includeSubDomain)
-    } catch (error) {
-      console.error(`[TabGroupService] Error getting group domain:`, error)
-      return null
+    if (recent.length >= MAX_REFILES) {
+      // Every pull-out while we hold off keeps the minute running
+      this.refileTimes.set(tabId, [...recent, now])
+      console.warn(`[TabGroupService] Tab ${tabId} keeps being moved out of its group, leaving it`)
+      return false
     }
+
+    const refiled = await this.handleTabUpdate(tabId)
+    if (refiled) {
+      this.refileTimes.set(tabId, [...recent, now])
+    }
+    return refiled
   }
 
   /**
@@ -987,6 +1204,34 @@ class TabGroupServiceSimplified {
   }
 
   /**
+   * Records a group's current colour under its title.
+   *
+   * The colour mapping is what a group is rebuilt from, so a colour the user
+   * picked by hand has to land there too — otherwise the next rebuild or
+   * startup restore silently reverts it to whatever we last chose (#102).
+   */
+  async rememberGroupColor(group: Browser.tabGroups.TabGroup): Promise<boolean> {
+    try {
+      const title = stripIndexPrefix(group.title || "")
+      if (!title) return false
+
+      // The mapping doubles as our ownership ledger — writing a foreign group
+      // into it would make us start managing someone else's group (#96).
+      const tabsInGroup = await browser.tabs.query({ groupId: group.id })
+      if (!(await this.isOwnGroup(group, tabsInGroup))) return false
+
+      if ((await getGroupColor(title)) === group.color) return false
+
+      await updateGroupColor(title, group.color as TabGroupColor)
+      console.log(`[TabGroupService] Remembered color "${group.color}" for "${title}"`)
+      return true
+    } catch (error) {
+      console.warn(`[TabGroupService] Failed to remember group color:`, error)
+      return false
+    }
+  }
+
+  /**
    * Restores saved colors
    */
   async restoreSavedColors(): Promise<boolean> {
@@ -998,7 +1243,7 @@ class TabGroupServiceSimplified {
       let restoredCount = 0
 
       for (const group of groups) {
-        const savedColor = colorMappingValue[group.title || ""]
+        const savedColor = colorMappingValue[stripIndexPrefix(group.title || "")]
         if (savedColor && savedColor !== group.color) {
           try {
             await browser.tabGroups.update(group.id, {

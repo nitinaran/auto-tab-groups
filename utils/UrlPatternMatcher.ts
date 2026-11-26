@@ -11,7 +11,8 @@ import type { PatternValidationResult } from "../types"
 export const PATTERN_TYPES = {
   SIMPLE_WILDCARD: "simple_wildcard",
   SEGMENT_EXTRACTION: "segment_extraction",
-  REGEX: "regex"
+  REGEX: "regex",
+  TITLE: "title"
 } as const
 
 export type PatternType = (typeof PATTERN_TYPES)[keyof typeof PATTERN_TYPES]
@@ -32,7 +33,28 @@ export interface MatchOptions {
   ruleName?: string
   groupNameTemplate?: string
   allowAutoSubdomain?: boolean
+  /** The tab's title, needed by "title:" patterns and ignored by the rest */
+  title?: string
 }
+
+/** Prefix that switches a pattern from matching the URL to matching the title */
+export const TITLE_PATTERN_PREFIX = "title:"
+
+/**
+ * Most wildcards and variables one extraction pattern may contain.
+ *
+ * Measured cost of one match against a 60-character URL: 4 wildcards 3ms,
+ * 5 wildcards 31ms, 6 wildcards 285ms, 7 wildcards 2.3s. Real patterns use
+ * two or three ("*.reddit.com/r/{subreddit}/comments/*" is three), so 4 is
+ * both room to work and a ceiling on what a hostile rules file can cost.
+ */
+const MAX_EXTRACTION_WILDCARDS = 4
+
+/** A single match this slow means the pattern, not the machine, is the problem */
+const SLOW_MATCH_MS = 250
+
+/** Budget for the validation probe below */
+const SLOW_PROBE_MS = 25
 
 /**
  * Pattern validation result with type
@@ -69,11 +91,14 @@ interface SegmentPatternInfo {
 }
 
 class UrlPatternMatcher {
+  /** Regex patterns caught taking too long, skipped until the worker restarts */
+  private slowPatterns = new Set<string>()
+
   /**
    * Main entry point - matches a URL against a pattern
    */
   match(url: string, pattern: string, options: MatchOptions = {}): MatchResult {
-    if (!url || !pattern) {
+    if (!pattern || (!url && !this.isTitlePattern(pattern))) {
       return { matched: false, extractedValues: {}, groupName: null }
     }
 
@@ -86,6 +111,8 @@ class UrlPatternMatcher {
     const patternType = this.detectPatternType(pattern)
 
     switch (patternType) {
+      case PATTERN_TYPES.TITLE:
+        return this.matchTitle(options.title || "", pattern, options)
       case PATTERN_TYPES.SEGMENT_EXTRACTION:
         return this.matchSegmentExtraction(url, pattern, options)
       case PATTERN_TYPES.REGEX:
@@ -99,6 +126,12 @@ class UrlPatternMatcher {
    * Detects the type of pattern
    */
   detectPatternType(pattern: string): PatternType {
+    // A "title:" prefix decides what the pattern is matched against, so it
+    // wins over the syntax checks below — a title may contain anything
+    if (this.isTitlePattern(pattern)) {
+      return PATTERN_TYPES.TITLE
+    }
+
     // Check for segment extraction patterns (contains {variable})
     if (/\{[^}]+\}/.test(pattern)) {
       return PATTERN_TYPES.SEGMENT_EXTRACTION
@@ -114,20 +147,201 @@ class UrlPatternMatcher {
   }
 
   /**
-   * Candidate strings to match a pattern against, query string last.
+   * Wildcard matching without a regex.
    *
-   * The query is tried only after the plain hostname/path has failed, which
-   * keeps this purely additive: a pattern that matched before still matches the
-   * same text with the same capture groups, and only patterns that need the
-   * query see it. Case is preserved so extracted values (a ticket id, say) keep
-   * theirs when they become a group name.
+   * "a*b*c" compiled to /a[^/]*b[^/]*c/ backtracks exponentially in the number
+   * of wildcards: twenty of them against a sixty-character URL took over a
+   * minute here, with the service worker blocked for all of it. Patterns are
+   * not only typed by the person using them — they arrive in imported rules
+   * files too — so a pattern's cost must not depend on who wrote it.
+   *
+   * This is the textbook two-pointer glob: on a mismatch it hands one more
+   * character to the last "*" and carries on, which visits each character at
+   * most once per wildcard instead of exploring every split.
+   *
+   * @param separator a character "*" may never swallow (path "/", host ".")
+   * @param fullMatch whether the pattern must consume the whole text
    */
-  private matchTargets(urlObj: URL, base: string, lowercaseQuery = false): string[] {
-    // The wildcard matcher lowercases its pattern and path, so its query has to
-    // be lowercased too. The extraction matchers keep case, because their
-    // captures become group titles.
-    const search = lowercaseQuery ? urlObj.search.toLowerCase() : urlObj.search
-    return search ? [base, base + search] : [base]
+  private globMatch(text: string, pattern: string, separator: string, fullMatch: boolean): boolean {
+    let textIndex = 0
+    let patternIndex = 0
+    let lastStar = -1
+    let starTextIndex = 0
+
+    while (textIndex < text.length) {
+      if (!fullMatch && patternIndex === pattern.length) return true
+
+      if (pattern[patternIndex] === "*") {
+        lastStar = patternIndex
+        starTextIndex = textIndex
+        patternIndex++
+      } else if (patternIndex < pattern.length && pattern[patternIndex] === text[textIndex]) {
+        textIndex++
+        patternIndex++
+      } else if (lastStar !== -1) {
+        // Give the last "*" one more character — unless that character is the
+        // separator, which no single "*" is allowed to cross
+        if (text[starTextIndex] === separator) return false
+        starTextIndex++
+        textIndex = starTextIndex
+        patternIndex = lastStar + 1
+      } else {
+        return false
+      }
+    }
+
+    while (patternIndex < pattern.length && pattern[patternIndex] === "*") patternIndex++
+    return patternIndex === pattern.length
+  }
+
+  /**
+   * Whether a user's regex backtracks catastrophically.
+   *
+   * A regex is the one pattern type that cannot be made safe by rewriting the
+   * matcher — it is the user's own program, and JavaScript cannot interrupt one
+   * mid-run. So it is measured instead: exponential backtracking is already
+   * obvious on a short string (a few million steps), while any sane regex
+   * finishes a twenty-character probe in microseconds. Short probes are what
+   * keep this check itself cheap — the same regex on sixty characters would
+   * take hours.
+   *
+   * Catches the classic shapes, not every possible one. Patterns that slip
+   * through are quarantined by matchRegex() after their first slow run.
+   */
+  private backtracksBadly(regex: RegExp): boolean {
+    const probes = [`${"a".repeat(20)}!`, `${"ab".repeat(10)}!`, `${"a-".repeat(10)}!`]
+    const started = performance.now()
+
+    for (const probe of probes) {
+      try {
+        regex.test(probe)
+      } catch {
+        return false
+      }
+      if (performance.now() - started > SLOW_PROBE_MS) return true
+    }
+
+    return false
+  }
+
+  /**
+   * Whether a pattern addresses the tab's title rather than its URL.
+   */
+  isTitlePattern(pattern: string): boolean {
+    return pattern.trim().toLowerCase().startsWith(TITLE_PATTERN_PREFIX)
+  }
+
+  /** The pattern with its "title:" prefix removed */
+  private titleSpec(pattern: string): string {
+    return pattern.trim().substring(TITLE_PATTERN_PREFIX.length).trim()
+  }
+
+  /**
+   * Matches a tab title against a "title:" pattern (#98).
+   *
+   * Titles are prose, not structure: they carry spaces, dashes and dots that
+   * mean nothing, so this has none of the URL matchers' segment rules. The
+   * text has to appear somewhere in the title and "*" stands for any run of
+   * characters. Everything else, braces included, is literal.
+   *
+   * ponytail: no {variable} capture here — "{channel} - YouTube" has no single
+   * right answer on "Video - Channel - YouTube", and guessing one would name
+   * people's groups wrong. Titles name their group after the rule; the URL
+   * matchers keep extraction, where the structure makes it unambiguous.
+   */
+  matchTitle(title: string, pattern: string, options: MatchOptions = {}): MatchResult {
+    const noMatch: MatchResult = { matched: false, extractedValues: {}, groupName: null }
+
+    const spec = this.titleSpec(pattern)
+    if (!title || !spec) return noMatch
+
+    // Scanned rather than turned into a regex: "*a*a*a…" compiles to a regex
+    // that backtracks exponentially, and rules arrive from imported files as
+    // well as from the person using them. indexOf walks the title once per
+    // literal, so a hostile pattern costs no more than a sensible one.
+    const haystack = title.toLowerCase()
+    const literals = spec.toLowerCase().split("*")
+    let cursor = 0
+
+    for (const literal of literals) {
+      if (!literal) continue
+
+      const found = haystack.indexOf(literal, cursor)
+      if (found === -1) return noMatch
+
+      cursor = found + literal.length
+    }
+
+    return {
+      matched: true,
+      extractedValues: {},
+      groupName: options.groupNameTemplate || options.ruleName || null
+    }
+  }
+
+  /**
+   * Rewrites "host?query" as "host/*query" (#98).
+   *
+   * A query written straight after the host has no path to live in, so the
+   * host half used to swallow it and the pattern was rejected for containing
+   * "?" and "=". Reading it as "anywhere on this host" is both what people
+   * mean by it and what the documented "host/*key=value" form already does —
+   * the leading "*" is why parameter order does not matter.
+   */
+  private normalizeQueryOnlyPattern(pattern: string): string {
+    const questionMark = pattern.indexOf("?")
+    if (questionMark === -1) return pattern
+
+    const slash = pattern.indexOf("/")
+    if (slash !== -1 && slash < questionMark) return pattern
+
+    return `${pattern.substring(0, questionMark)}/*${pattern.substring(questionMark + 1)}`
+  }
+
+  /**
+   * The hostname, then the same hostname with leading subdomains dropped when
+   * the caller allows it.
+   *
+   * RulesService retries every rule with allowAutoSubdomain so "youtube.com"
+   * reaches "www.youtube.com". The wildcard matcher has always honoured that;
+   * extraction patterns silently did not, so the same rule text matched
+   * different hosts depending on which pattern type it happened to be (#98).
+   */
+  private candidateHostnames(hostname: string, options: MatchOptions): string[] {
+    if (!options.allowAutoSubdomain) return [hostname]
+
+    const hosts = [hostname]
+    const labels = hostname.split(".")
+    for (let i = 1; labels.length - i >= 2; i++) {
+      hosts.push(labels.slice(i).join("."))
+    }
+    return hosts
+  }
+
+  /**
+   * Candidate strings to match a pattern against, query string and hash last.
+   *
+   * The query and hash are tried only after the plain hostname/path has failed,
+   * which keeps this purely additive: a pattern that matched before still
+   * matches the same text with the same capture groups, and only patterns that
+   * need them see them. Case is preserved so extracted values (a ticket id,
+   * say) keep theirs when they become a group name.
+   */
+  private matchTargets(urlObj: URL, base: string, lowercase = false): string[] {
+    // The wildcard matcher lowercases its pattern and path, so the query and
+    // hash have to be lowercased too. The extraction matchers keep case,
+    // because their captures become group titles.
+    const search = lowercase ? urlObj.search.toLowerCase() : urlObj.search
+    const hash = lowercase ? urlObj.hash.toLowerCase() : urlObj.hash
+
+    const targets = [base]
+    if (search) targets.push(base + search)
+    // Hash routing (example.com/app/#/admin) puts the meaningful path after #
+    if (hash) {
+      targets.push(base + hash)
+      if (search) targets.push(base + search + hash)
+    }
+    return targets
   }
 
   /**
@@ -138,7 +352,7 @@ class UrlPatternMatcher {
       const urlObj = new URL(url)
       const hostname = urlObj.hostname.toLowerCase()
       const pathname = urlObj.pathname.toLowerCase()
-      const cleanPattern = pattern.toLowerCase().trim()
+      const cleanPattern = this.normalizeQueryOnlyPattern(pattern.toLowerCase().trim())
 
       // Check if pattern includes a path
       const hasPath = cleanPattern.includes("/")
@@ -196,18 +410,7 @@ class UrlPatternMatcher {
       const parts = cleanPattern.split("**")
       if (parts.length !== 2) return false
 
-      const prefix = parts[0]
-      const suffix = parts[1]
-
-      if (!cleanDomain.startsWith(prefix)) return false
-      if (suffix && !cleanDomain.endsWith(suffix)) return false
-
-      const remainder = cleanDomain.substring(prefix.length)
-      if (suffix) {
-        const beforeSuffix = remainder.substring(0, remainder.length - suffix.length)
-        return beforeSuffix.length > 0 && /^[a-zA-Z0-9.-]+$/.test(beforeSuffix)
-      }
-      return remainder.length > 0 && /^[a-zA-Z0-9.-]+$/.test(remainder)
+      return this.matchDoubleStarDomain(cleanDomain, parts[0], parts[1])
     }
 
     // Handle * wildcard for subdomains (*.domain.com)
@@ -237,17 +440,45 @@ class UrlPatternMatcher {
   }
 
   /**
+   * Matches a host against a "prefix**suffix" pattern, where "**" stands for
+   * one or more characters that may cross dots — a TLD, or "co.uk".
+   *
+   * The halves around it used to be compared literally, so a single wildcard
+   * in them matched nothing: `*.google.**` was documented as reaching
+   * `docs.google.com` and quietly matched no host at all. They are globs now,
+   * which is what everywhere else in a pattern already means.
+   */
+  private matchDoubleStarDomain(domain: string, prefix: string, suffix: string): boolean {
+    const isHostText = /^[a-zA-Z0-9.-]+$/
+    const suffixIsGlob = suffix.includes("*")
+
+    for (let split = 0; split <= domain.length; split++) {
+      if (!this.globMatch(domain.substring(0, split), prefix, ".", true)) continue
+
+      if (!suffixIsGlob) {
+        if (!domain.endsWith(suffix)) return false
+
+        const suffixStart = domain.length - suffix.length
+        const middle = domain.substring(split, suffixStart)
+        if (middle.length > 0 && isHostText.test(middle)) return true
+        continue
+      }
+
+      // A wildcard in the suffix as well — try every place it could start
+      for (let end = split + 1; end <= domain.length; end++) {
+        if (!isHostText.test(domain.substring(split, end))) break
+        if (this.globMatch(domain.substring(end), suffix, ".", true)) return true
+      }
+    }
+
+    return false
+  }
+
+  /**
    * Matches patterns with wildcards in the middle
    */
   matchMiddleWildcard(domain: string, pattern: string): boolean {
-    // Convert pattern to regex, escaping special chars except *
-    const regexPattern = pattern
-      .split("*")
-      .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-      .join("[^.]*")
-
-    const regex = new RegExp(`^${regexPattern}$`)
-    return regex.test(domain)
+    return this.globMatch(domain, pattern, ".", true)
   }
 
   /**
@@ -275,14 +506,8 @@ class UrlPatternMatcher {
 
     // Handle single * wildcard in path segments (match single segment)
     if (cleanPattern.includes("*")) {
-      // Convert pattern to regex: * matches any characters within a segment (not /)
-      const regexPattern = cleanPattern
-        .split("*")
-        .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-        .join("[^/]*")
-
-      const regex = new RegExp(`^${regexPattern}`)
-      return regex.test(cleanPath)
+      // Prefix match: the pattern has to be satisfied, the path may continue
+      return this.globMatch(cleanPath, cleanPattern, "/", false)
     }
 
     // Exact prefix matching
@@ -303,12 +528,15 @@ class UrlPatternMatcher {
         return { matched: false, extractedValues: {}, groupName: null }
       }
 
-      const base = pattern.includes("/") ? hostname + pathname : hostname
       const regex = this.buildSegmentRegex(patternInfo)
 
       let match: RegExpMatchArray | null = null
-      for (const target of this.matchTargets(urlObj, base)) {
-        match = target.match(regex)
+      for (const host of this.candidateHostnames(hostname, options)) {
+        const base = pattern.includes("/") ? host + pathname : host
+        for (const target of this.matchTargets(urlObj, base)) {
+          match = target.match(regex)
+          if (match) break
+        }
         if (match) break
       }
 
@@ -404,17 +632,19 @@ class UrlPatternMatcher {
         regexStr += literal
       } else if (part.type === "variable") {
         const variable = part.value as VariableSpec
+        // "&" and "#" end a value wherever it sits: without them a capture in
+        // a query string runs on into the parameters after it (#98)
         if (variable.delimiter === "dash") {
-          regexStr += "([^-]+)"
-        } else if (variable.delimiter === "dot") {
-          regexStr += "([^.]+)"
+          regexStr += "([^-&#]+)"
         } else {
-          regexStr += "([^.]+)"
+          regexStr += "([^.&#]+)"
         }
       }
     }
 
-    regexStr += "$"
+    // A pattern that ends inside a query string addresses one parameter, so
+    // whatever follows the one it captured is none of its business (#98)
+    regexStr += "(?:[&#].*)?$"
     return new RegExp(regexStr, "i")
   }
 
@@ -426,6 +656,18 @@ class UrlPatternMatcher {
     extractedValues: Record<string, string>,
     options: MatchOptions
   ): string {
+    return this.groupNameFor(extractedValues, patternInfo.variables[0]?.name, options)
+  }
+
+  /**
+   * The group name for a set of captures: the template if there is one, else
+   * the first captured value, else the rule's own name.
+   */
+  private groupNameFor(
+    extractedValues: Record<string, string>,
+    firstVariableName: string | undefined,
+    options: MatchOptions
+  ): string {
     if (options.groupNameTemplate) {
       let groupName = options.groupNameTemplate
       for (const [key, value] of Object.entries(extractedValues)) {
@@ -434,9 +676,8 @@ class UrlPatternMatcher {
       return groupName
     }
 
-    const firstVariable = patternInfo.variables[0]
-    if (firstVariable && extractedValues[firstVariable.name]) {
-      return extractedValues[firstVariable.name]
+    if (firstVariableName && extractedValues[firstVariableName]) {
+      return extractedValues[firstVariableName]
     }
 
     return options.ruleName || "Extracted Group"
@@ -446,16 +687,32 @@ class UrlPatternMatcher {
    * Matches using regex patterns
    */
   matchRegex(url: string, pattern: string, options: MatchOptions = {}): MatchResult {
+    // Rules saved before the validation probe existed, or slow only on certain
+    // URLs, get one bad run and are then left out of every later match. In
+    // memory on purpose: a service worker restart is a fair second chance, and
+    // a rule the user has since fixed should not stay broken forever.
+    if (this.slowPatterns.has(pattern)) {
+      return { matched: false, extractedValues: {}, groupName: null }
+    }
+
     try {
       const regexStr = pattern.slice(1, -1)
       const regex = new RegExp(regexStr, "i")
 
       const urlObj = new URL(url)
+      const started = performance.now()
 
       let match: RegExpMatchArray | null = null
       for (const target of this.matchTargets(urlObj, urlObj.hostname + urlObj.pathname)) {
         match = target.match(regex)
         if (match) break
+      }
+
+      if (performance.now() - started > SLOW_MATCH_MS) {
+        console.warn(
+          `[UrlPatternMatcher] Pattern "${pattern}" took too long to match and will be skipped`
+        )
+        this.slowPatterns.add(pattern)
       }
 
       if (!match) {
@@ -516,6 +773,14 @@ class UrlPatternMatcher {
     const patternType = this.detectPatternType(inner)
 
     switch (patternType) {
+      case PATTERN_TYPES.TITLE:
+        return this.titleSpec(inner)
+          ? { isValid: true, error: null, type: PATTERN_TYPES.TITLE }
+          : {
+              isValid: false,
+              error: "Title pattern cannot be empty after 'title:'",
+              type: PATTERN_TYPES.TITLE
+            }
       case PATTERN_TYPES.SEGMENT_EXTRACTION:
         return this.validateSegmentPattern(inner)
       case PATTERN_TYPES.REGEX:
@@ -572,7 +837,8 @@ class UrlPatternMatcher {
   /**
    * Validates a simple wildcard pattern
    */
-  validateSimpleWildcardPattern(pattern: string): PatternValidationResultWithType {
+  validateSimpleWildcardPattern(rawPattern: string): PatternValidationResultWithType {
+    const pattern = this.normalizeQueryOnlyPattern(rawPattern)
     const hasPath = pattern.includes("/")
     const [fullDomainPattern, pathPattern] = hasPath ? pattern.split("/", 2) : [pattern, ""]
 
@@ -635,8 +901,8 @@ class UrlPatternMatcher {
       }
     }
 
-    // ?, = and & are allowed so a pattern can address a query string
-    if (hasPath && pathPattern && !/^[a-zA-Z0-9._/*?=&%+~:,-]*$/.test(pathPattern)) {
+    // ?, = and & are allowed so a pattern can address a query string, # a hash
+    if (hasPath && pathPattern && !/^[a-zA-Z0-9._/*?=&%+~:,#-]*$/.test(pathPattern)) {
       return {
         isValid: false,
         error: "Path pattern contains invalid characters",
@@ -651,6 +917,19 @@ class UrlPatternMatcher {
    * Validates a segment extraction pattern
    */
   validateSegmentPattern(pattern: string): PatternValidationResultWithType {
+    // Extraction still goes through a regex, because the captures are the
+    // point, and that regex backtracks exponentially in the number of
+    // wildcards and variables: twenty of them took over a minute. Nothing
+    // legible needs more than a handful, so the count is where it is stopped.
+    const wildcards = (pattern.match(/\*/g) || []).length + (pattern.match(/\{/g) || []).length
+    if (wildcards > MAX_EXTRACTION_WILDCARDS) {
+      return {
+        isValid: false,
+        error: `Pattern has too many wildcards and variables (max ${MAX_EXTRACTION_WILDCARDS})`,
+        type: PATTERN_TYPES.SEGMENT_EXTRACTION
+      }
+    }
+
     const info = this.parseSegmentPattern(pattern)
 
     if (!info.valid) {
@@ -717,7 +996,16 @@ class UrlPatternMatcher {
     }
 
     try {
-      new RegExp(regexStr)
+      const regex = new RegExp(regexStr)
+
+      if (this.backtracksBadly(regex)) {
+        return {
+          isValid: false,
+          error: "Regex is too slow to run on every tab — avoid nested quantifiers",
+          type: PATTERN_TYPES.REGEX
+        }
+      }
+
       return { isValid: true, error: null, type: PATTERN_TYPES.REGEX }
     } catch (error) {
       return {

@@ -30,6 +30,23 @@ html {
   box-sizing: border-box;
 }
 
+.rule-delete-dialog {
+  margin: auto;
+  max-width: calc(100% - 32px);
+  padding: 20px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+}
+
+.rule-delete-dialog p {
+  margin-bottom: 16px;
+  overflow-wrap: anywhere;
+}
+
+.rule-delete-dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+
 .selectable {
   -moz-user-select: text;
   user-select: text;
@@ -1622,6 +1639,26 @@ input:checked + .slider:before {
 
 .shortcuts-button:hover {
   background: var(--secondary-color-dark, #e5e7eb);
+}
+
+.consolidate-preview {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--secondary-color, #ccc);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.consolidate-preview-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.consolidate-preview-count {
+  color: #6c757d;
+  white-space: nowrap;
 }
 
 /* Utility — declared last so it beats the layout rules above */

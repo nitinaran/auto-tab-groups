@@ -579,14 +579,43 @@ function toggleBlacklistSection(): void {
 
 // Delete rule
 async function deleteRule(ruleId: string, ruleName: string): Promise<void> {
-  const prompt = t(
+  const dialog = document.createElement("dialog")
+  dialog.className = "rule-delete-dialog"
+  const prompt = document.createElement("p")
+  prompt.id = "rule-delete-prompt"
+  prompt.textContent = t(
     "rulesDeleteConfirm",
     `Are you sure you want to delete the rule "${ruleName}"?`,
     ruleName
   )
-  if (!confirm(prompt)) {
-    return
-  }
+  dialog.setAttribute("aria-labelledby", prompt.id)
+  const actions = document.createElement("form")
+  actions.method = "dialog"
+  actions.className = "rule-actions"
+  const cancel = document.createElement("button")
+  cancel.className = "rule-action-btn"
+  cancel.textContent = t("ruleModalCancel", "Cancel")
+  cancel.value = "cancel"
+  const remove = document.createElement("button")
+  remove.className = "rule-action-btn delete"
+  remove.textContent = t("rulesDelete", "Delete")
+  remove.value = "delete"
+  actions.append(cancel, remove)
+  dialog.append(prompt, actions)
+  document.body.append(dialog)
+  const confirmed = await new Promise<boolean>(resolve => {
+    dialog.addEventListener(
+      "close",
+      () => {
+        resolve(dialog.returnValue === "delete")
+        dialog.remove()
+      },
+      { once: true }
+    )
+    dialog.showModal()
+    cancel.focus()
+  })
+  if (!confirmed) return
 
   try {
     const response = await sendMessage<{ success?: boolean; error?: string }>({
@@ -746,6 +775,124 @@ async function renderProtectedGroups(): Promise<void> {
  * Assigning keys can only happen there — an extension cannot bind them for
  * you, which is also why nothing is bound until someone visits this page.
  */
+const consolidateRow = document.getElementById("consolidateRow") as HTMLDivElement
+const consolidateLabel = document.getElementById("consolidateLabel") as HTMLSpanElement
+const consolidateButton = document.getElementById("consolidateButton") as HTMLButtonElement
+const consolidatePreview = document.getElementById("consolidatePreview") as HTMLDivElement
+const consolidateHelp = document.getElementById("consolidateHelp") as HTMLDivElement
+
+interface ConsolidationMove {
+  title: string
+  fromWindowId: number
+  toWindowId: number
+  tabIds: number[]
+}
+
+/** Whether the preview is open, i.e. the next click confirms rather than reveals */
+let consolidateArmed = false
+
+/**
+ * Shows how many groups are split across windows, and offers to merge them.
+ *
+ * Two clicks on purpose. The merge cannot be undone — nothing records where a
+ * tab came from — so the first click only reveals the plan. The list is also
+ * the answer to "where did my groups end up", which is the question that
+ * prompted this.
+ *
+ * The row is absent entirely when there is nothing to merge, rather than
+ * present and inert.
+ */
+async function renderConsolidation(): Promise<void> {
+  const response = await sendMessage<{ moves?: ConsolidationMove[] }>({
+    action: "planGroupConsolidation"
+  })
+  const moves = response?.moves ?? []
+
+  consolidateArmed = false
+  consolidatePreview.innerHTML = ""
+  consolidatePreview.classList.add("hidden")
+  consolidateButton.textContent = t("settingConsolidateAction", "Review")
+
+  const isEmpty = moves.length === 0
+  consolidateRow.classList.toggle("hidden", isEmpty)
+  consolidateHelp.classList.toggle("hidden", isEmpty)
+  if (isEmpty) return
+
+  const windowCount = new Set([
+    ...moves.map(move => move.fromWindowId),
+    ...moves.map(move => move.toWindowId)
+  ]).size
+
+  consolidateLabel.textContent = t(
+    "settingConsolidate",
+    `${moves.length} group(s) spread across ${windowCount} windows`,
+    [String(moves.length), String(windowCount)]
+  )
+}
+
+function showConsolidationPreview(moves: ConsolidationMove[]): void {
+  consolidatePreview.innerHTML = ""
+
+  for (const move of moves) {
+    const row = document.createElement("div")
+    row.className = "consolidate-preview-row"
+
+    const name = document.createElement("span")
+    name.textContent = move.title
+
+    const count = document.createElement("span")
+    count.className = "consolidate-preview-count"
+    count.textContent = t("settingConsolidateTabCount", `${move.tabIds.length} tabs`, [
+      String(move.tabIds.length)
+    ])
+
+    row.appendChild(name)
+    row.appendChild(count)
+    consolidatePreview.appendChild(row)
+  }
+
+  consolidatePreview.classList.remove("hidden")
+  consolidateButton.textContent = t("settingConsolidateConfirm", "Merge them")
+  consolidateArmed = true
+}
+
+consolidateButton.addEventListener("click", async () => {
+  if (!consolidateArmed) {
+    const response = await sendMessage<{ moves?: ConsolidationMove[] }>({
+      action: "planGroupConsolidation"
+    })
+    const moves = response?.moves ?? []
+
+    if (moves.length === 0) {
+      await renderConsolidation()
+      return
+    }
+
+    showConsolidationPreview(moves)
+    return
+  }
+
+  consolidateButton.disabled = true
+  try {
+    const result = await sendMessage<{ movedTabs?: number; movedGroups?: number }>({
+      action: "consolidateGroups"
+    })
+    const moved = String(result?.movedTabs ?? 0)
+    const groups = String(result?.movedGroups ?? 0)
+
+    await renderConsolidation()
+    showRulesMessage(
+      t("settingConsolidateDone", `Merged ${groups} group(s), ${moved} tabs moved`, [
+        groups,
+        moved
+      ]),
+      "success"
+    )
+  } finally {
+    consolidateButton.disabled = false
+  }
+})
+
 const openShortcutsButton = document.getElementById("openShortcutsButton") as HTMLButtonElement
 
 openShortcutsButton.addEventListener("click", async () => {
@@ -842,6 +989,7 @@ window.addEventListener("pagehide", () => {
 
 // Initialize toggle states
 renderProtectedGroups()
+renderConsolidation()
 
 sendMessage<{ enabled?: boolean }>({ action: "getAutoGroupState" }).then(response => {
   if (response?.enabled !== undefined) {

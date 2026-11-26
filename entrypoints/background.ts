@@ -371,6 +371,14 @@ export default defineBackground(() => {
             break
           }
 
+          case "planGroupConsolidation":
+            result = { moves: await tabGroupService.planGroupConsolidation() }
+            break
+
+          case "consolidateGroups":
+            result = await tabGroupService.consolidateGroups()
+            break
+
           case "moveTabToGroupWindow":
             result = await tabGroupService.moveTabToItsGroupWindow(msg.tabId)
             break
@@ -905,6 +913,14 @@ export default defineBackground(() => {
         console.log(`[tabs.onUpdated] Tab ${tabId} was unpinned, applying grouping`)
         await ensureStateLoaded()
         await tabGroupService.handleTabUpdate(tabId)
+      } else if (changeInfo.title) {
+        // Titles arrive after the URL and change again on client-side
+        // navigation, so this only costs anything when a rule matches on them
+        await ensureStateLoaded()
+        if (rulesService.hasTitleRules()) {
+          console.log(`[tabs.onUpdated] Title changed to: ${changeInfo.title}`)
+          await tabGroupService.handleTabUpdate(tabId)
+        }
       }
     } catch (error) {
       console.error(`[tabs.onUpdated] Error handling tab ${tabId} update:`, error)
@@ -1028,10 +1044,8 @@ export default defineBackground(() => {
       try {
         await ensureStateLoaded()
 
-        const domain = await tabGroupService.getGroupDomain(group.id)
-        if (!domain) return
-
-        console.log(`[tabGroups.onUpdated] Group ${group.id} updated for domain "${domain}"`)
+        // Keeps a hand-picked colour as the one we rebuild the group with
+        await tabGroupService.rememberGroupColor(group)
       } catch (error) {
         console.error("[tabGroups.onUpdated] Error handling group update:", error)
       }

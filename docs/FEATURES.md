@@ -46,6 +46,21 @@ Titles are matched with any sort-index prefix stripped, so the "Number groups"
 setting doesn't break exclusions. Renaming an excluded group ends its
 exclusion — title is identity here, as everywhere else in the extension.
 
+## Consolidating Groups Across Windows
+
+When the same group exists in more than one window, Advanced shows a row saying
+so. Clicking **Review** lists what would move; clicking again merges each group
+into the window that already holds most of it.
+
+The row only appears when something is actually split, and the two-step flow is
+deliberate: **this cannot be undone.** Nothing records which window a tab came
+from, so there is no way back. The preview is also a quick answer to "where did
+my groups end up".
+
+Skipped by design: groups excluded from auto-grouping, the System group, and
+pinned tabs. There is no keyboard shortcut — an unrecoverable action shouldn't
+be one keypress away.
+
 ## Moving a Tab to Its Group's Window
 
 Right-click a tab and choose "Move tab to its group's window" to send it to the
@@ -109,10 +124,12 @@ Custom rules support advanced URL pattern matching beyond simple domains.
 | Subdomain Wildcard | `*.google.com` | `docs.google.com/*` |
 | Domain + Path | `docs.google.com/forms` | `docs.google.com/forms*` |
 | TLD Wildcard | `google.**/forms` | `google.com/forms`, `google.org/forms` |
+| Subdomain + TLD | `*.google.**` | `docs.google.com`, `mail.google.co.uk` |
 | Path Wildcard | `site.com/**/admin` | `site.com/any/path/admin` |
 | Catch-All | `*` | everything no other rule took |
 | Query String | `site.com/?ticket=VZ01` | that exact query |
 | Query Extraction | `site.com/?ticket={ticket}` | a group per ticket value |
+| Page Title | `title:Barely Sociable` | any tab whose title says that |
 
 ### Catch-All Rules
 
@@ -168,11 +185,64 @@ title — so `?ticket=VZ01` and `?ticket=VZ02` land in separate groups.
 The query is only consulted after host and path have failed to match, so
 patterns written before this existed behave exactly as they did.
 
+A query written straight after the host needs no path in between:
+
+```txt
+youtube.com?ab_channel=BarelySociable
+```
+
+reads as "anywhere on this host", which is why the parameter can sit anywhere
+in the query. Written with a path — `youtube.com/watch?ab_channel=...` — the
+parameter has to be the first one, so put a `*` before it if it might not be:
+`youtube.com/watch?*ab_channel=...`.
+
+### Hash Routes
+
+Single-page apps often put the real route after a `#`. A pattern containing `#`
+is matched against the fragment too, so those routes can be split apart:
+
+```txt
+apps.example.com/directory/#/admin/*     -> one group
+apps.example.com/directory/#/analytics/* -> another
+app.io/directory/#/{section}             -> a group per section
+```
+
+Write the `#` as-is — no escaping. Like the query, the fragment is only
+consulted after host and path have failed to match.
+
+### Page Titles
+
+A pattern prefixed with `title:` is matched against the tab's title instead of
+its URL. Useful when the page's address says nothing about what it is:
+
+```txt
+title:Barely Sociable      -> any tab with that text in its title
+title:*- Figma             -> every Figma document
+!title:*Private*           -> as an exclusion, like any other pattern
+```
+
+- The text has to appear somewhere in the title; `*` stands for any run of
+  characters. Everything else, braces included, is literal.
+- Matching ignores case, and the group is named after the rule.
+- Titles arrive after the URL and change again on client-side navigation, so a
+  tab is re-filed whenever its title changes — but only while some enabled rule
+  actually matches on titles.
+- There is no `{variable}` capture here: a title is prose, so
+  `title:{channel} - YouTube` has no single right answer on
+  `Video - Channel - YouTube`. Extraction stays on the URL side, where the
+  structure makes it unambiguous.
+
 ### Limitations
 
 - Single `**` per domain or path component
 - Case-insensitive matching
 - Protocol agnostic (works with http/https)
+- An extraction pattern may hold at most 4 wildcards and `{variables}`
+  combined. Matching them is exponential in that count, and a rules file you
+  imported from someone else is not something to run unbounded work for.
+- A regex pattern that backtracks catastrophically (`/(a+)+$/` and friends) is
+  rejected when the rule is saved or imported. One that gets past the check and
+  turns out slow anyway is skipped from then on, and says so in the console.
 
 ## Export/Import Rules
 
@@ -247,6 +317,10 @@ Groups only created when minimum tab count is met.
 - Below threshold: tabs remain ungrouped
 - Meets threshold: group created with all matching tabs
 - Falls below threshold: group disbanded, tabs ungrouped
+- Only groups the extension itself would have created are disbanded. A group
+  another extension or the browser's own "new group" made — anything whose
+  title is not `System`, a rule's name, or a title the extension has produced
+  before — is left alone, however few tabs it holds
 
 ## Focus Mode (Auto-Collapse)
 
