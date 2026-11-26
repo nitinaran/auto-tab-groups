@@ -14,6 +14,7 @@ import {
   enableAutoGroup,
   getExtensionId,
   launchExtensionContext,
+  openPopup,
   sendMessage,
   setupCleanState,
   TEST_URLS,
@@ -68,6 +69,16 @@ test.describe("Host grouping setting", () => {
   test("setting defaults to off", async () => {
     const toggle = popup.locator("#groupByHostToggle")
     await expect(toggle).not.toBeChecked()
+  })
+
+  test("site rules are saved when the popup closes without leaving the text box", async () => {
+    const rules = "viavi.atlassian.net/wiki => VIAVIConfluence"
+    await popup.locator("#hostKeyRulesInput").fill(rules)
+    await popup.close()
+
+    const reopened = await openPopup(context, extensionId)
+    await expect(reopened.locator("#hostKeyRulesInput")).toHaveValue(rules)
+    await reopened.close()
   })
 
   test("reorders tabs within a group so same-host tabs are adjacent", async () => {

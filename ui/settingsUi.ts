@@ -807,16 +807,37 @@ sendMessage<{ rules?: HostKeyRule[] }>({ action: "getHostKeyRules" }).then(respo
   }
 })
 
-hostKeyRulesInput.addEventListener("change", () => {
-  sendMessage<{ rules?: HostKeyRule[] }>({
+// Saved as the user types (debounced) rather than only on blur: a popup closes
+// the moment the user clicks away, and that can happen before "change" fires,
+// silently dropping the edit.
+const HOST_KEY_RULES_SAVE_DELAY_MS = 300
+let hostKeyRulesSaveTimer: ReturnType<typeof setTimeout> | undefined
+
+function saveHostKeyRules(): Promise<{ rules?: HostKeyRule[] }> {
+  clearTimeout(hostKeyRulesSaveTimer)
+  return sendMessage<{ rules?: HostKeyRule[] }>({
     action: "setHostKeyRules",
     rules: parseHostKeyRules(hostKeyRulesInput.value)
-  }).then(response => {
+  })
+}
+
+hostKeyRulesInput.addEventListener("input", () => {
+  clearTimeout(hostKeyRulesSaveTimer)
+  hostKeyRulesSaveTimer = setTimeout(saveHostKeyRules, HOST_KEY_RULES_SAVE_DELAY_MS)
+})
+
+hostKeyRulesInput.addEventListener("change", () => {
+  saveHostKeyRules().then(response => {
     // Show the normalised form so the user sees how their text was read
     if (response?.rules) {
       hostKeyRulesInput.value = formatHostKeyRules(response.rules)
     }
   })
+})
+
+// Flush a pending edit if the popup/sidebar is torn down before the timer fires
+window.addEventListener("pagehide", () => {
+  if (hostKeyRulesSaveTimer !== undefined) saveHostKeyRules()
 })
 
 // Initialize toggle states
